@@ -1,5 +1,6 @@
+import React from 'react';
 import { Navigate } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext.jsx';
+import { useAuth } from '../context/AuthContext';
 
 // Guards a route so only authenticated users can access it.
 // Guests are redirected to the login page.
