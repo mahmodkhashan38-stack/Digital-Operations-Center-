@@ -1,0 +1,12 @@
+node_modules/
+node_modules_broken*/
+
+.env
+
+npm-debug.log*
+*.log
+
+*.tmp
+*.bak
+*.orig
+*~
