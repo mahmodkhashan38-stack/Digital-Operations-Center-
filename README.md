@@ -2,20 +2,16 @@
 
 Digital Operations Center is a full-stack web application for managing organizational incidents, requests, and operational tasks.
 
-The system allows users to report issues and requests, track their status, and manage organizational operations through a centralized dashboard.
+This repository currently contains the Sprint 1 foundation: a Node.js/Express/MongoDB backend and a React/Vite frontend with a complete registration, login, logout, and protected-route authentication flow.
 
-## Main Features
+## Main Features (Sprint 1)
 
-- Public content viewing
-- User registration
-- Login and logout
-- Secure password storage
-- Ticket and request management
-- Status tracking
-- Role-based permissions
-- Admin management
-- Dashboard
-- Database persistence
+- Public home page (no login required)
+- User registration (creates an employee account)
+- Login and logout with JWT-based authentication
+- Secure password storage (bcrypt hashing)
+- Protected dashboard route (requires authentication)
+- MongoDB database connection and persistence
 
 ## Team Members
 
@@ -25,4 +21,4 @@ The system allows users to report issues and requests, track their status, and m
 
 ## Project Status
 
-Initial planning and requirements analysis.
+Sprint 1 complete: backend foundation, frontend foundation, MongoDB connection, and full authentication (registration, login, logout, protected routes) are implemented and working.
