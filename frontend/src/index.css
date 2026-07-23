@@ -571,7 +571,7 @@ a {
 
 .dashboard-shell {
   width: 100%;
-  max-width: 780px;
+  max-width: 960px;
   display: flex;
   flex-direction: column;
   gap: 1.75rem;
@@ -648,6 +648,13 @@ a {
   margin-top: 0.4rem;
 }
 
+.form-hint {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin-top: 0.4rem;
+}
+
 .form-error-server {
   background-color: rgba(225, 29, 72, 0.1);
   border: 1px solid rgba(225, 29, 72, 0.3);
@@ -667,6 +674,290 @@ a {
   margin: 0 0 1.35rem;
   text-align: left;
   font-size: 0.9rem;
+}
+
+/* ---------- Admin Dashboard (DOC-37) ---------- */
+.admin-page {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.admin-shell {
+  width: 100%;
+  max-width: 960px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+.admin-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.admin-section-header h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 1.3rem;
+}
+
+.admin-panel {
+  padding: 1.75rem;
+}
+
+.admin-panel h2 {
+  margin: 0 0 0.4rem;
+  color: var(--text-primary);
+  font-size: 1.2rem;
+}
+
+.admin-subform {
+  margin-top: 1.1rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.25rem 0 0.5rem;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.checkbox-field input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
+.form-actions-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.org-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.25rem;
+}
+
+.org-card {
+  padding: 1.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  text-align: left;
+}
+
+.org-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.org-card-header h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 1.1rem;
+  word-break: break-word;
+}
+
+.status-badge {
+  flex-shrink: 0;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.status-active {
+  background-color: rgba(34, 197, 94, 0.14);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: #86efac;
+}
+
+.status-inactive {
+  background-color: rgba(225, 29, 72, 0.12);
+  border: 1px solid rgba(225, 29, 72, 0.32);
+  color: var(--color-primary-light);
+}
+
+.org-card-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.9rem;
+}
+
+.org-card-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.org-code {
+  font-family: 'Courier New', Courier, monospace;
+  letter-spacing: 0.05em;
+}
+
+.org-code-updated {
+  color: #86efac;
+  font-size: 0.75rem;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  letter-spacing: normal;
+}
+
+.org-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.org-card-actions .btn {
+  padding: 0.6rem 1.1rem;
+  font-size: 0.85rem;
+}
+
+/* ---------- Manager Dashboard (DOC-36) ---------- */
+.manager-page {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.manager-shell {
+  width: 100%;
+  max-width: 960px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+.user-section h2 {
+  margin: 0 0 1.1rem;
+  color: var(--text-primary);
+  font-size: 1.15rem;
+}
+
+.user-table-wrapper {
+  overflow-x: auto;
+}
+
+.user-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.92rem;
+}
+
+.user-table th {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 0.75rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.user-table td {
+  padding: 0.85rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.user-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.user-table-action-cell {
+  display: table-cell;
+}
+
+.user-table-action-cell .btn {
+  padding: 0.55rem 1rem;
+  font-size: 0.85rem;
+}
+
+.user-table-action-cell .form-error {
+  margin-top: 0.4rem;
+}
+
+.user-table-role-cell {
+  text-transform: capitalize;
+  color: var(--text-secondary);
+}
+
+/* ---------- Operator Dashboard (DOC-42) ---------- */
+.operator-page {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.operator-shell {
+  width: 100%;
+  max-width: 960px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+/* ---------- Organization Information (Manager Dashboard, DOC-42) ------- */
+.org-info-panel h2 {
+  margin: 0 0 1.1rem;
+  color: var(--text-primary);
+  font-size: 1.15rem;
+}
+
+.org-info-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1.1rem;
+}
+
+/* ---------- Placeholder stats + empty states (DOC-42) -------------------
+   Used everywhere a section is structurally ready but has no backend data
+   yet (Request/Ticket counts, Assigned/My Requests) - visually distinct
+   (muted, smaller, italic) from a real number/list so it always reads as
+   "not available yet", never as a real (or worse, fake) zero. */
+.stat-card-placeholder {
+  opacity: 0.75;
+}
+
+.stat-value-placeholder {
+  font-size: 0.85rem;
+  font-weight: 500;
+  font-style: italic;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.empty-state {
+  text-align: center;
+}
+
+.empty-state-title {
+  margin: 0 0 0.5rem;
+  color: var(--text-primary);
+  font-size: 1.05rem;
+}
+
+.empty-state-message {
+  margin: 0;
 }
 
 /* ---------- Responsive layout ---------- */
@@ -720,6 +1011,19 @@ a {
 
   .dashboard-welcome {
     padding: 1.85rem;
+  }
+
+  .org-list {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-section-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .user-table {
+    font-size: 0.85rem;
   }
 }
 

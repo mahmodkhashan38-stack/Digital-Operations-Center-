@@ -1,12 +1,18 @@
 import { useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
+import { EMAIL_REGEX } from '../utils/validation.js';
 
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Mirrors the backend's Company Code format (DOC-41): 6 letters/digits.
+// This is just a fast, friendly client-side check for obviously wrong
+// input - the backend (src/utils/companyCode.js) remains the authority on
+// what is actually valid and whether the code resolves to a real,
+// active Organization.
+const COMPANY_CODE_REGEX = /^[A-Za-z0-9]{6}$/;
 
 // Registration page. Performs basic client-side validation for a good UX,
-// then submits to the backend, which owns the real validation and role
-// assignment.
+// then submits to the backend, which owns the real validation, role
+// assignment, and Company Code -> Organization resolution (DOC-33).
 function Register() {
   const navigate = useNavigate();
   const { register, isAuthenticated, isLoading } = useAuth();
@@ -16,6 +22,7 @@ function Register() {
     email: '',
     password: '',
     confirmPassword: '',
+    companyCode: '',
   });
   const [errors, setErrors] = useState({});
   const [serverError, setServerError] = useState('');
@@ -28,7 +35,11 @@ function Register() {
 
   const handleChange = (event) => {
     const { name, value } = event.target;
-    setFormData((prev) => ({ ...prev, [name]: value }));
+    // Company Code is case-insensitive from the user's perspective; the
+    // backend normalizes it authoritatively regardless, but uppercasing it
+    // as the person types makes it visually match the code they were given.
+    const nextValue = name === 'companyCode' ? value.toUpperCase() : value;
+    setFormData((prev) => ({ ...prev, [name]: nextValue }));
   };
 
   const validate = () => {
@@ -54,6 +65,12 @@ function Register() {
       nextErrors.confirmPassword = 'Passwords do not match.';
     }
 
+    if (!formData.companyCode.trim()) {
+      nextErrors.companyCode = 'Company code is required.';
+    } else if (!COMPANY_CODE_REGEX.test(formData.companyCode.trim())) {
+      nextErrors.companyCode = 'Company code must be 6 letters/digits.';
+    }
+
     return nextErrors;
   };
 
@@ -74,6 +91,7 @@ function Register() {
         fullName: formData.fullName.trim(),
         email: formData.email.trim(),
         password: formData.password,
+        companyCode: formData.companyCode.trim(),
       });
       navigate('/login');
     } catch (error) {
@@ -175,6 +193,30 @@ function Register() {
               />
             </div>
             {errors.confirmPassword && <span className="form-error">{errors.confirmPassword}</span>}
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="companyCode">Company Code</label>
+            <div className="input-group">
+              <span className="input-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="7" width="18" height="13" rx="2" />
+                  <path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+              </span>
+              <input
+                id="companyCode"
+                name="companyCode"
+                type="text"
+                placeholder="A7K9P2"
+                maxLength={6}
+                autoCapitalize="characters"
+                value={formData.companyCode}
+                onChange={handleChange}
+              />
+            </div>
+            <span className="form-hint">Ask your organization for this code - it connects your account to them.</span>
+            {errors.companyCode && <span className="form-error">{errors.companyCode}</span>}
           </div>
 
           <div className="form-actions">
