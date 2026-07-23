@@ -1,12 +1,18 @@
 import { useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
+import { destinationForRole } from '../utils/roleRoutes.js';
 
 // Login page. Submits credentials to the backend, stores the JWT on
 // success, and redirects the user to the dashboard.
+// A logged-in user's post-login destination depends on their role - see
+// utils/roleRoutes.js for the full mapping: system_admin -> /admin (DOC-37),
+// manager -> /manager (DOC-36), operator -> /operator (DOC-42), employee ->
+// /dashboard (DOC-42).
+
 function Login() {
   const navigate = useNavigate();
-  const { login, isAuthenticated, isLoading } = useAuth();
+  const { login, isAuthenticated, isLoading, user } = useAuth();
 
   const [formData, setFormData] = useState({ email: '', password: '' });
   const [errors, setErrors] = useState({});
@@ -14,7 +20,7 @@ function Login() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!isLoading && isAuthenticated) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={destinationForRole(user?.role)} replace />;
   }
 
   const handleChange = (event) => {
@@ -45,8 +51,8 @@ function Login() {
 
     setIsSubmitting(true);
     try {
-      await login(formData);
-      navigate('/dashboard');
+      const loggedInUser = await login(formData);
+      navigate(destinationForRole(loggedInUser?.role));
     } catch (error) {
       setServerError(error.message);
     } finally {

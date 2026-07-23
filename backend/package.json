@@ -4,7 +4,9 @@
   "description": "Backend server for the Digital Operations Center project",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "migrate:users-organizations": "node scripts/migrateUsersToOrganizations.js",
+    "seed:system-admin": "node scripts/seedSystemAdmin.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
