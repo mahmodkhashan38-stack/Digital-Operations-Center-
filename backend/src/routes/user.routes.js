@@ -1,8 +1,16 @@
 const express = require('express');
 const verifyToken = require('../middleware/auth');
 const requireRole = require('../middleware/requireRole');
+const requirePasswordChangeCompleted = require('../middleware/requirePasswordChangeCompleted');
 const { requireOrganizationMembership, requireActiveOrganization } = require('../middleware/organizationScope');
-const { listOrganizationUsers, updateUserRole } = require('../controllers/user.controller');
+const {
+  listOrganizationUsers,
+  updateUserRole,
+  updateUserProfile,
+  updateUserStatus,
+  updateUserSpecialties,
+  resetUserPassword,
+} = require('../controllers/user.controller');
 
 const router = express.Router();
 
@@ -24,9 +32,35 @@ const router = express.Router();
 //                                    (DOC-38/DOC-35 section 13) - System
 //                                    Admin can still reactivate it globally
 //                                    via /api/organizations
-router.use(verifyToken, requireRole('manager'), requireOrganizationMembership, requireActiveOrganization);
+//
+// DOC-57 - requirePasswordChangeCompleted is inserted immediately after
+// verifyToken (before requireRole, since this gate is role-agnostic): a
+// Manager whose OWN mustChangePassword is true cannot perform any action
+// on this router - including resetting someone else's password - until
+// they clear their own flag via PATCH /api/auth/change-password first.
+router.use(
+  verifyToken,
+  requirePasswordChangeCompleted,
+  requireRole('manager'),
+  requireOrganizationMembership,
+  requireActiveOrganization,
+);
 
 router.get('/', listOrganizationUsers);
 router.patch('/:id/role', updateUserRole);
+// DOC-50: profile edit (fullName/email) and activate/deactivate - both
+// scoped and protected-target-checked exactly like the role endpoint
+// above, see resolveManageableTarget in user.controller.js.
+router.patch('/:id', updateUserProfile);
+router.patch('/:id/status', updateUserStatus);
+// DOC-44: Manager-only, full-replacement specialty assignment for an
+// Operator in the Manager's own Organization - see
+// updateUserSpecialties in user.controller.js for the complete
+// validation/isolation rules.
+router.patch('/:id/specialties', updateUserSpecialties);
+// DOC-57 - Flow B, "Manager Password Reset" - see resetUserPassword in
+// user.controller.js for the complete authorization/target-protection/
+// inactive-user-policy rules.
+router.patch('/:id/reset-password', resetUserPassword);
 
 module.exports = router;

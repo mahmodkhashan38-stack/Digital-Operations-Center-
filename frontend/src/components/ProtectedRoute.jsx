@@ -1,6 +1,11 @@
-import { Navigate } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { destinationForRole } from '../utils/roleRoutes.js';
+
+// DOC-57 - the one path this component must never redirect AWAY from on
+// account of `mustChangePassword`, or the person could never actually
+// clear that flag (an infinite redirect loop back to itself).
+const CHANGE_PASSWORD_PATH = '/change-password';
 
 // Guards a route so only authenticated users can access it, and optionally
 // only users with one of a specific set of roles (DOC-37).
@@ -30,6 +35,7 @@ import { destinationForRole } from '../utils/roleRoutes.js';
 // finished loading yet.
 function ProtectedRoute({ children, roles }) {
   const { isAuthenticated, isLoading, user } = useAuth();
+  const location = useLocation();
 
   if (isLoading) {
     return (
@@ -47,6 +53,21 @@ function ProtectedRoute({ children, roles }) {
 
   if (roles && !roles.includes(user?.role)) {
     return <Navigate to={destinationForRole(user?.role)} replace />;
+  }
+
+  // DOC-57 - "Secure Password Management": a user whose password was just
+  // reset by their Manager (or who otherwise has mustChangePassword ===
+  // true) is redirected away from every normal protected page to
+  // /change-password - this is a UX convenience only, exactly like every
+  // other check in this component; the real boundary is the backend's
+  // own requirePasswordChangeCompleted middleware, which independently
+  // rejects the underlying API calls regardless of what this component
+  // does. The explicit path check below is what prevents a redirect loop
+  // - /change-password is itself wrapped in this same ProtectedRoute (no
+  // `roles` restriction), so without this check a forced-change user
+  // would be bounced right back to the page they're already on.
+  if (user?.mustChangePassword && location.pathname !== CHANGE_PASSWORD_PATH) {
+    return <Navigate to={CHANGE_PASSWORD_PATH} replace />;
   }
 
   return children;

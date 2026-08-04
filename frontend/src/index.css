@@ -245,6 +245,34 @@ a {
   transform: translateY(1px);
 }
 
+/* Visible keyboard-focus ring, reusing the app's own glow token rather
+   than inventing a new one - only applies when the browser considers the
+   interaction keyboard-driven (:focus-visible), so a mouse click doesn't
+   also show it. Added while polishing the Organization Chat UI, but
+   scoped to the shared .btn class so every button in the app gets a
+   consistent, visible focus state, not just chat's. */
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-glow);
+}
+
+/* Standard visually-hidden-but-accessible utility (task spec: "Add proper
+   labels" / "accessible button text") - content stays available to
+   screen readers without taking up visual space, for cases where a
+   visible label would be redundant next to a clear placeholder/context
+   (used by the Organization Chat composer's "Message" label). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .btn-primary {
   background: linear-gradient(135deg, var(--color-primary), var(--color-primary-hover));
   color: #ffffff;
@@ -272,6 +300,21 @@ a {
 
 .btn-block {
   width: 100%;
+}
+
+/* ---------- Destructive action (DOC-47) ---------- */
+.btn-danger {
+  background-color: transparent;
+  border-color: rgba(225, 29, 72, 0.55);
+  color: var(--color-primary-light);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #ffffff;
+  box-shadow: var(--shadow-glow-strong);
+  transform: translateY(-2px);
 }
 
 .btn-lg {
@@ -676,6 +719,23 @@ a {
   font-size: 0.9rem;
 }
 
+/* DOC-48: a non-blocking, non-error notice - currently used only for
+   "this operator still has active assigned requests" after deactivating
+   one (task spec section 11). Deliberately a different color from
+   .form-error (nothing failed) and .form-success (nothing to celebrate) -
+   an amber/informational tone. */
+.form-warning {
+  display: block;
+  background-color: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  color: #fbbf24;
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.9rem;
+  margin-top: 0.5rem;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
 /* ---------- Admin Dashboard (DOC-37) ---------- */
 .admin-page {
   display: flex;
@@ -794,6 +854,125 @@ a {
   color: var(--color-primary-light);
 }
 
+/* DOC-11/46: RequestStatusBadge's status-keyed modifiers, sharing the
+   same .status-badge base as the Active/Inactive badge above. */
+.status-request-open {
+  background-color: rgba(96, 165, 250, 0.14);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  color: #93c5fd;
+}
+
+.status-request-in_progress {
+  background-color: rgba(250, 204, 21, 0.14);
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  color: #fde68a;
+}
+
+.status-request-resolved,
+.status-request-closed {
+  background-color: rgba(34, 197, 94, 0.14);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: #86efac;
+}
+
+.status-request-reopened {
+  background-color: rgba(225, 29, 72, 0.12);
+  border: 1px solid rgba(225, 29, 72, 0.32);
+  color: var(--color-primary-light);
+}
+
+/* DOC-46: cancelled is visually distinct from every workflow status above
+   (muted gray, not red/blue/green/yellow) - it is a terminal Employee
+   decision, not a step in the Operator/Manager workflow. */
+.status-request-cancelled {
+  background-color: rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #cbd5e1;
+}
+
+/* DOC-55 - "Request SLA and Due Dates". RequestSlaBadge.jsx's badge
+   modifiers, sharing the same .status-badge base every other badge in
+   this project already uses. */
+.status-sla-on-track {
+  background-color: rgba(34, 197, 94, 0.14);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: #86efac;
+}
+
+.status-sla-due-soon {
+  background-color: rgba(250, 204, 21, 0.14);
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  color: #fde68a;
+}
+
+.status-sla-overdue {
+  background-color: rgba(225, 29, 72, 0.14);
+  border: 1px solid rgba(225, 29, 72, 0.35);
+  color: var(--color-primary-light);
+}
+
+.status-sla-completed-on-time {
+  background-color: rgba(34, 197, 94, 0.14);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: #86efac;
+}
+
+.status-sla-completed-late {
+  background-color: rgba(250, 204, 21, 0.14);
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  color: #fde68a;
+}
+
+.status-sla-unavailable {
+  background-color: rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #cbd5e1;
+}
+
+/* Organization Chat's small per-message role badges, sharing the same
+   .status-badge base class as every badge above - System Admin
+   deliberately has no color modifier here since it can never appear in
+   Organization Chat (see RoleBadge in OrganizationChat.jsx). */
+.chat-role-badge {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.6rem;
+}
+
+.status-role-manager {
+  background-color: rgba(225, 29, 72, 0.12);
+  border: 1px solid rgba(225, 29, 72, 0.32);
+  color: var(--color-primary-light);
+}
+
+.status-role-operator {
+  background-color: rgba(96, 165, 250, 0.14);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  color: #93c5fd;
+}
+
+.status-role-employee {
+  background-color: rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #cbd5e1;
+}
+
+.sla-badge-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+}
+
+.sla-duration {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.sla-due-date {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
 .org-card-details {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
@@ -804,6 +983,26 @@ a {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+}
+
+/* DOC-49: Manager email shown as a smaller line under their name inside
+   the same stat-value slot - kept lightweight rather than a whole extra
+   detail block just for one secondary field. */
+.org-card-detail-sub {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+/* DOC-49 "Organization Overview": Employee/Operator counts, visually
+   separated from the primary Company Code/Manager/Created block above by
+   a divider, the same convention org-card-actions-danger (DOC-47) already
+   uses for separating a distinct group of information/actions. */
+.org-card-overview {
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
 }
 
 .org-code {
@@ -827,6 +1026,15 @@ a {
 .org-card-actions .btn {
   padding: 0.6rem 1.1rem;
   font-size: 0.85rem;
+}
+
+/* DOC-47: kept in its own row, separated by a divider, so a destructive
+   action is never adjacent enough to Activate/Regenerate to invite a
+   misclick. */
+.org-card-actions-danger {
+  margin-top: 0.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
 }
 
 /* ---------- Manager Dashboard (DOC-36) ---------- */
@@ -899,6 +1107,400 @@ a {
 .user-table-role-cell {
   text-transform: capitalize;
   color: var(--text-secondary);
+}
+
+/* DOC-50: three actions (Promote/Demote, Edit, Activate/Deactivate) now
+   share one Action cell - wrap rather than force the table wider than the
+   card, the existing .user-table-wrapper { overflow-x: auto } already
+   covers the rest. */
+.user-table-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.user-table-action-group .btn {
+  padding: 0.55rem 0.9rem;
+  font-size: 0.82rem;
+}
+
+/* DOC-50: inline edit row (fullName/email) - replaces a table row's normal
+   cells with a small form spanning the full row width while editing. */
+.user-row-edit-form {
+  padding: 0.5rem 0;
+}
+
+/* DOC-52: the inline operator-select + Assign/Reassign control inside
+   ManagerRequestRow's "Assign" column - a compact row rather than the
+   full .form-group stack used by standalone forms, since this lives
+   inside an already-narrow table cell. */
+.assign-operator-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.assign-operator-form select {
+  padding: 0.5rem 0.65rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.assign-operator-form .btn {
+  padding: 0.55rem 0.9rem;
+  font-size: 0.82rem;
+}
+
+/* Sprint 4 (DOC-59) - the Edit/Remove Operator/Cancel/Close action
+   buttons in ManagerRequestRow's action cell, below the existing DOC-52
+   assign form. */
+.manager-request-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.manager-request-actions .btn {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.78rem;
+}
+
+/* DOC-54 - "Request Search, Filters and Sorting" shared controls panel
+   (RequestSearchControls.jsx), used above the Request table on all three
+   dashboards. `.request-search-grid` mirrors `.user-row-edit-fields`'s
+   own auto-fit grid pattern below - the same compact, responsive stack
+   this project already uses for a row of related small fields. Manager-
+   only fields (Operator/Requester/date range) simply add more grid items
+   when rendered; the grid reflows on its own, no extra CSS needed. */
+.request-search-panel {
+  margin-bottom: 1.5rem;
+}
+
+.request-search-text {
+  margin-bottom: 1rem;
+}
+
+.request-search-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.request-search-grid .form-group {
+  margin-bottom: 0;
+}
+
+.request-search-grid select,
+.request-search-grid input {
+  width: 100%;
+  padding: 0.7rem 0.9rem;
+  font-size: 0.9rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.request-search-actions {
+  margin-top: 1.25rem;
+}
+
+/* DOC-53 - "Dashboard Statistics" grouped breakdown sections
+   (StatBreakdownList.jsx) - a small, dependency-free horizontal bar list,
+   deliberately not a charting library. `.stat-breakdown-bar-track`/
+   `-fill` reuse the same primary gradient `.btn-primary` already uses, so
+   these visually match the rest of the app without new color tokens. */
+.stat-breakdown {
+  margin-bottom: 1.5rem;
+}
+
+.stat-breakdown-title {
+  margin: 0 0 1rem;
+  font-size: 1rem;
+  color: var(--text-primary);
+}
+
+.stat-breakdown-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.stat-breakdown-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.35fr) 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.stat-breakdown-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat-breakdown-bar-track {
+  height: 10px;
+  border-radius: 999px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.stat-breakdown-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-hover));
+  transition: width var(--transition);
+}
+
+.stat-breakdown-count {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 2ch;
+  text-align: right;
+}
+
+/* DOC-53 - Manager's "Operator Workload" table reuses `.user-table`'s
+   existing look (no new table styling needed). */
+.stat-error-panel {
+  margin-bottom: 1.5rem;
+}
+
+.user-row-edit-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.user-row-edit-field {
+  margin-bottom: 0;
+}
+
+/* DOC-44: Operator-only specialty summary shown under the Role cell, and
+   the "Manage Specialties" checkbox list that replaces the row while
+   editing (reuses .user-row-edit-form's row-takeover layout above). */
+.user-specialties-summary {
+  margin-top: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.user-row-edit-title {
+  margin: 0 0 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.specialty-checkbox-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+.specialty-checkbox-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.88rem;
+  color: var(--text-primary);
+  font-weight: 400;
+}
+
+/* DOC-11: RequestRow's inline "View Details" expansion - reuses
+   .org-card-detail's label/value stack for each field. */
+.request-detail-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 0.5rem 0;
+}
+
+.request-detail-description {
+  font-weight: 400;
+  white-space: pre-wrap;
+}
+
+.request-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1.1rem;
+}
+
+/* DOC-46: the inline Edit Request form, replacing the read-only detail
+   grid while active. Reuses .form-group's existing label/input stacking. */
+.request-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* DOC-46: the required confirm/keep panel before a Cancel Request actually
+   fires - visually distinct (bordered) from the surrounding detail panel
+   so it reads as a deliberate, separate step, not just another button. */
+.cancel-confirm-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border-radius: 8px;
+  border: 1px solid rgba(225, 29, 72, 0.35);
+  background: rgba(225, 29, 72, 0.06);
+}
+
+/* DOC-13: the comment thread inside RequestRow's expanded detail panel. */
+.request-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+}
+
+.comment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.comment-item {
+  padding: 0.75rem 0.9rem;
+  border-radius: 8px;
+  background: var(--surface-muted, rgba(255, 255, 255, 0.04));
+}
+
+.comment-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.comment-author {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.comment-timestamp {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.comment-content {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 0.92rem;
+  color: var(--text-secondary, var(--text-primary));
+}
+
+.comment-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* DOC-45: the image attachments section inside RequestRow's expanded
+   detail panel (always rendered - existing images stay visible even on a
+   cancelled/closed Request), and the matching "queued but not yet
+   submitted" image list reused by both RequestRow's Add Images form and
+   the Employee Dashboard's create-request form. Mirrors
+   .request-comments's border-top/flex-column pattern for visual
+   consistency. */
+.request-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+}
+
+.attachment-gallery {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.9rem;
+}
+
+.attachment-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem;
+  border-radius: 8px;
+  background: var(--surface-muted, rgba(255, 255, 255, 0.04));
+  text-align: center;
+}
+
+.attachment-thumb {
+  width: 100%;
+  height: 100px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.attachment-thumb-broken {
+  object-fit: none;
+  opacity: 0.4;
+}
+
+.attachment-caption {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  word-break: break-word;
+  max-width: 100%;
+}
+
+.attachment-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.selected-image-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.selected-image-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  background: var(--surface-muted, rgba(255, 255, 255, 0.04));
+}
+
+.selected-image-name {
+  font-size: 0.85rem;
+  color: var(--text-secondary, var(--text-primary));
+  word-break: break-word;
 }
 
 /* ---------- Operator Dashboard (DOC-42) ---------- */
@@ -1025,6 +1627,57 @@ a {
   .user-table {
     font-size: 0.85rem;
   }
+
+  /* Organization Chat (task spec: "Mobile: chat uses most of the screen
+     width, bubbles do not overflow, composer stays usable, header
+     actions remain accessible, role badges and timestamps remain
+     readable."). */
+  .chat-shell {
+    max-width: 100%;
+  }
+
+  .chat-container {
+    min-height: 420px;
+    border-radius: var(--radius-md);
+  }
+
+  .chat-header {
+    padding: 1.1rem 1.15rem;
+  }
+
+  .chat-header-title {
+    font-size: 1.15rem;
+  }
+
+  .chat-refresh-btn {
+    padding: 0.45rem 0.85rem;
+    font-size: 0.78rem;
+  }
+
+  .chat-message-list {
+    padding: 1rem;
+  }
+
+  .chat-load-older-row {
+    padding: 0.75rem 1rem 0;
+  }
+
+  .chat-message {
+    max-width: 90%;
+  }
+
+  .chat-composer {
+    padding: 0.85rem 1rem 1rem;
+  }
+
+  .chat-composer-row {
+    gap: 0.5rem;
+  }
+
+  .chat-send-btn {
+    padding: 0.65rem 1.1rem;
+    font-size: 0.85rem;
+  }
 }
 
 @media (max-width: 420px) {
@@ -1035,4 +1688,427 @@ a {
   .dashboard-stats {
     grid-template-columns: 1fr;
   }
+
+  .chat-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .chat-refresh-btn {
+    align-self: flex-start;
+  }
+
+  .chat-message {
+    max-width: 95%;
+  }
+}
+
+/* DOC-58 - Duplicate Request Detection confirm dialog (Employee Dashboard
+   only). No modal/dialog styling existed anywhere in this project before
+   this - built from the same design tokens and `.card`/`.btn` conventions
+   already used everywhere else, rather than introducing new colors. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 100;
+}
+
+.modal-panel {
+  width: 100%;
+  max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.duplicate-request-list {
+  list-style: none;
+  margin: 1rem 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.duplicate-request-item {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 0.85rem 1rem;
+  background-color: var(--bg-input);
+}
+
+.duplicate-request-item-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.duplicate-request-item-sub {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 0.4rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+/* DOC-60 - "Organization Chat" UI/UX redesign. Reuses existing tokens
+   (--bg-*, --color-primary*, --radius-*, --shadow-*, --border-color,
+   .btn/.form-error/.empty-state) rather than inventing a new visual
+   language - scoped entirely under .chat-page/.chat-* selectors so no
+   other page or dashboard is affected by any rule here. */
+.chat-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.chat-shell {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The single bordered/rounded/shadowed panel that IS the chat - header,
+   message area and composer all live inside it as one visual unit
+   (task spec: "The chat container should have clear borders, rounded
+   corners, subtle shadow..."). `flex: 1` + the .chat-page/.chat-shell
+   chain above lets it fill the available viewport height (task spec:
+   "good vertical height, no unnecessary empty space") without any
+   fragile `calc(100vh - Npx)` guesswork; `min-height` is only a floor
+   for very short viewports. */
+.chat-container {
+  flex: 1;
+  min-height: 480px;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+
+/* ---------- Chat header ---------- */
+.chat-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.5rem 1.75rem;
+  border-bottom: 1px solid var(--border-color);
+  background: linear-gradient(135deg, rgba(225, 29, 72, 0.1), rgba(225, 29, 72, 0.02));
+}
+
+.chat-header-title {
+  margin: 0;
+  font-size: 1.3rem;
+  color: var(--text-primary);
+}
+
+.chat-header-meta {
+  margin: 0.35rem 0 0;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+}
+
+.chat-header-scope {
+  margin: 0.15rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.chat-refresh-btn {
+  flex-shrink: 0;
+  padding: 0.55rem 1.05rem;
+  font-size: 0.82rem;
+}
+
+.chat-refresh-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-refresh-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* ---------- Body: loading / error / empty / message area ---------- */
+.chat-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.chat-loading-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+}
+
+.chat-loading-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--border-color-strong);
+  border-top-color: var(--color-primary);
+  animation: chatSpin 0.7s linear infinite;
+}
+
+@keyframes chatSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.chat-error-block {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1.5rem 1.75rem;
+}
+
+/* The shared EmptyState component renders its own `.card`-style panel;
+   inside the chat body it should read as part of the same panel, not a
+   nested card, so its own border/shadow/background are neutralized here
+   and it simply centers within the available space instead. */
+.chat-body .empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  border-radius: 0;
+}
+
+.chat-message-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.chat-load-older-row {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1.5rem 0;
+}
+
+.chat-load-older-row .btn {
+  padding: 0.5rem 0.95rem;
+  font-size: 0.8rem;
+}
+
+.chat-message-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 1.25rem 1.5rem;
+}
+
+/* ---------- Date separators ---------- */
+.chat-date-separator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0.9rem 0 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.chat-date-separator:first-child {
+  margin-top: 0;
+}
+
+.chat-date-separator span {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 0.3rem 0.9rem;
+}
+
+/* ---------- Message bubbles ---------- */
+.chat-message {
+  max-width: 78%;
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.9rem;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  align-self: flex-start;
+}
+
+/* A grouped (same-author, close-in-time) continuation bubble sits closer
+   to the one before it and shows only a small trailing timestamp instead
+   of repeating the full author/role/timestamp header (task spec: "avoid
+   repeating large headers unnecessarily... keep timestamp visible enough
+   to understand the conversation"). */
+.chat-message-grouped {
+  margin-top: -0.15rem;
+}
+
+/* The current viewer's own messages are visually distinguished (task
+   spec) - aligned to the right and tinted with the app's own primary
+   color, rather than a second unrelated color. */
+.chat-message-own {
+  align-self: flex-end;
+  background: linear-gradient(135deg, rgba(225, 29, 72, 0.18), rgba(225, 29, 72, 0.08));
+  border-color: rgba(225, 29, 72, 0.32);
+}
+
+.chat-message-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.25rem;
+}
+
+.chat-message-author {
+  font-weight: 700;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+.chat-message-timestamp {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.chat-message-timestamp-grouped {
+  display: block;
+  margin: 0.15rem 0 0;
+  text-align: right;
+}
+
+.chat-message-content {
+  margin: 0;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.92rem;
+}
+
+/* ---------- "New messages" jump indicator ---------- */
+.chat-jump-button {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1.1rem;
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-hover));
+  color: #ffffff;
+  border: none;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-glow-strong);
+  animation: fadeInUp 0.25s ease both;
+}
+
+.chat-jump-button:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-glow-strong), var(--shadow-glow);
+}
+
+/* ---------- Composer ---------- */
+.chat-composer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-color);
+  padding: 1rem 1.5rem 1.25rem;
+  background-color: var(--bg-card);
+}
+
+.chat-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.chat-composer-input {
+  flex: 1;
+  resize: none;
+  min-height: 44px;
+  max-height: 160px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 0.7rem 0.9rem;
+  font-family: inherit;
+  font-size: 0.92rem;
+  line-height: 1.4;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.chat-composer-input:focus-visible {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-glow);
+}
+
+.chat-composer-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.chat-send-btn {
+  flex-shrink: 0;
+  padding: 0.7rem 1.6rem;
+}
+
+.chat-composer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.chat-char-counter {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.chat-char-counter-over {
+  color: var(--color-primary-light);
+  font-weight: 700;
 }

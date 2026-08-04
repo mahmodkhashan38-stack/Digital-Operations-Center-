@@ -74,6 +74,13 @@ const verifyToken = async (req, res, next) => {
       role: user.role,
       organizationId: user.organizationId,
       isActive: user.isActive,
+      // DOC-57 - re-read fresh on every request, exactly like every other
+      // field on this trusted context (never trusted from the JWT
+      // payload itself, which never includes it) - a Manager reset takes
+      // effect on the very next request this user makes, and a
+      // successful self-change clears it just as immediately, with no
+      // token refresh/re-login required either way.
+      mustChangePassword: !!user.mustChangePassword,
     };
 
     return next();
