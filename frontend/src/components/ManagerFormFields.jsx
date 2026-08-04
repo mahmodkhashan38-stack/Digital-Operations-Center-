@@ -1,8 +1,13 @@
-// Reusable presentational fieldset for collecting a new Manager's
-// { fullName, email, password }. Used by both CreateOrganizationForm
-// (optional initial Manager, DOC-34) and OrganizationCard's "Assign
-// Manager" action (for an Organization that doesn't have one yet) - so the
-// same fields/markup/validation display exist in exactly one place.
+// Reusable presentational fieldset for collecting a Manager's
+// { fullName, email, password }. Used by CreateOrganizationForm (optional
+// initial Manager, DOC-34), OrganizationCard's "Assign Manager" action
+// (DOC-34) and "Replace Manager" action (DOC-49) - all three need a brand
+// new account's fullName/email/password.
+//
+// `showPassword` (DOC-49, default true) lets OrganizationCard's "Edit
+// Manager" action reuse the same fullName/email markup WITHOUT a password
+// field - editing an existing Manager's profile never touches their
+// password, so there is nothing to collect here for that case.
 //
 // This component never stores anything outside the parent's own state
 // (React state only, no localStorage/sessionStorage - see AdminDashboard
@@ -10,7 +15,7 @@
 // the request finishes, success or failure), and it never displays an
 // existing password - there is no such thing as an "existing" password
 // here, only a new one being typed in for account creation.
-function ManagerFormFields({ values, errors, onChange, idPrefix }) {
+function ManagerFormFields({ values, errors, onChange, idPrefix, showPassword = true }) {
   const fieldId = (name) => `${idPrefix}-${name}`;
 
   return (
@@ -59,28 +64,30 @@ function ManagerFormFields({ values, errors, onChange, idPrefix }) {
         {errors.email && <span className="form-error">{errors.email}</span>}
       </div>
 
-      <div className="form-group">
-        <label htmlFor={fieldId('password')}>Manager Password</label>
-        <div className="input-group">
-          <span className="input-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="5" y="11" width="14" height="9" rx="2" />
-              <path d="M8 11V8a4 4 0 0 1 8 0v3" />
-            </svg>
-          </span>
-          <input
-            id={fieldId('password')}
-            name="password"
-            type="password"
-            placeholder="••••••••"
-            value={values.password}
-            onChange={onChange}
-            autoComplete="new-password"
-          />
+      {showPassword && (
+        <div className="form-group">
+          <label htmlFor={fieldId('password')}>Manager Password</label>
+          <div className="input-group">
+            <span className="input-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="5" y="11" width="14" height="9" rx="2" />
+                <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+              </svg>
+            </span>
+            <input
+              id={fieldId('password')}
+              name="password"
+              type="password"
+              placeholder="••••••••"
+              value={values.password}
+              onChange={onChange}
+              autoComplete="new-password"
+            />
+          </div>
+          {errors.password && <span className="form-error">{errors.password}</span>}
+          <span className="form-hint">Share this password with the Manager directly - it cannot be viewed again here.</span>
         </div>
-        {errors.password && <span className="form-error">{errors.password}</span>}
-        <span className="form-hint">Share this password with the Manager directly - it cannot be viewed again here.</span>
-      </div>
+      )}
     </>
   );
 }

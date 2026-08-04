@@ -53,6 +53,19 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  // DOC-57 - lets a page that just received a fresh, real sanitized user
+  // object back from the backend (e.g. the Change Password page's own
+  // PATCH /api/auth/change-password response) update the shared auth
+  // state directly, without a second round trip to GET /api/auth/me.
+  // Never accepts a partial/locally-guessed object - every existing
+  // caller of this context already follows the same "only ever set
+  // `user` from a real backend response" discipline (see `login` above),
+  // this just exposes that same capability to components other than this
+  // provider itself.
+  const updateUser = (nextUser) => {
+    setUser(nextUser);
+  };
+
   const value = {
     user,
     token,
@@ -61,6 +74,7 @@ export function AuthProvider({ children }) {
     login,
     register,
     logout,
+    updateUser,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

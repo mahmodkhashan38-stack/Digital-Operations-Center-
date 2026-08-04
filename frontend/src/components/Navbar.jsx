@@ -47,8 +47,33 @@ function Navbar() {
         </NavLink>
         {isAuthenticated ? (
           <>
-            <NavLink to={dashboardNav.path} className={linkClass}>
-              {dashboardNav.label}
+            {/* DOC-57 - while a password change is required, the normal
+                dashboard link is hidden (task spec: "should not expose
+                normal dashboard actions during forced-change state if
+                that creates bypass/confusion") - ProtectedRoute.jsx would
+                bounce the person straight back to /change-password
+                anyway, so hiding it here avoids offering a link that can
+                never actually go anywhere else. "Change Password" and
+                Logout both always remain available either way. */}
+            {!user?.mustChangePassword && (
+              <NavLink to={dashboardNav.path} className={linkClass}>
+                {dashboardNav.label}
+              </NavLink>
+            )}
+            {/* DOC-60 - "Organization Chat". Manager/Operator/Employee only
+                (task spec) - never System Admin, and hidden during the
+                forced-password-change state for the same reason the
+                dashboard link above already is: ProtectedRoute would just
+                bounce the person straight back to /change-password anyway,
+                so offering a link that can never actually go anywhere else
+                would only be confusing. */}
+            {!user?.mustChangePassword && ['manager', 'operator', 'employee'].includes(user?.role) && (
+              <NavLink to="/chat" className={linkClass}>
+                Organization Chat
+              </NavLink>
+            )}
+            <NavLink to="/change-password" className={linkClass}>
+              Change Password
             </NavLink>
             <button type="button" className="nav-link nav-link-button" onClick={handleLogout}>
               Logout

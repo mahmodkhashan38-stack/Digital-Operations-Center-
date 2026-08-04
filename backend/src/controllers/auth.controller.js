@@ -3,10 +3,10 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const { normalizeCompanyCode, isValidCompanyCode } = require('../utils/companyCode');
+const { validatePassword, MIN_PASSWORD_LENGTH } = require('../utils/passwordPolicy');
 
 const SALT_ROUNDS = 10;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MIN_PASSWORD_LENGTH = 6;
 
 // Strips sensitive fields (passwordHash) before sending a user back to the client.
 // organizationId is included as-is (an id, or null) - it is not sensitive, and
@@ -14,6 +14,16 @@ const MIN_PASSWORD_LENGTH = 6;
 // For employees registered since DOC-33 this is always a real Organization
 // id; system_admin is always null; legacy pre-DOC-30 accounts and any
 // account not yet migrated (DOC-39) may still show null.
+//
+// DOC-57 - `mustChangePassword` is now always included (never
+// conditional): every existing pre-DOC-57 account simply has it default
+// to `false` (see models/User.js), so this is a harmless, uniform
+// addition to every existing response shape, never a breaking change.
+// The frontend uses this one field to decide whether to redirect to
+// /change-password - see ProtectedRoute.jsx. Never returns passwordHash,
+// a raw/new/reset password, a bcrypt salt, or any other internal
+// Mongoose metadata - exactly the same guarantee this function already
+// made before DOC-57.
 const sanitizeUser = (user) => ({
   id: user._id,
   fullName: user.fullName,
@@ -21,6 +31,7 @@ const sanitizeUser = (user) => ({
   role: user.role,
   organizationId: user.organizationId,
   isActive: user.isActive,
+  mustChangePassword: !!user.mustChangePassword,
   createdAt: user.createdAt,
 });
 
@@ -50,11 +61,14 @@ const register = async (req, res, next) => {
       return res.status(400).json({ status: 'error', message: 'Please provide a valid email address.' });
     }
 
-    if (password.length < MIN_PASSWORD_LENGTH) {
-      return res.status(400).json({
-        status: 'error',
-        message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters long.`,
-      });
+    // DOC-57 - reuses the one shared password-format validator (utils/
+    // passwordPolicy.js) instead of an inline length check - see that
+    // file's own comment for why MIN_PASSWORD_LENGTH is unchanged (still
+    // 6) and why a MAX_PASSWORD_LENGTH is now also enforced here for the
+    // first time.
+    const passwordFormatError = validatePassword(password);
+    if (passwordFormatError) {
+      return res.status(400).json({ status: 'error', message: passwordFormatError });
     }
 
     // Reuses DOC-41's exact normalization/validation - "abc123", "ABC123"
@@ -191,9 +205,95 @@ const getMe = async (req, res, next) => {
   }
 };
 
+// PATCH /api/auth/change-password (protected - verifyToken only, every
+// role: system_admin, manager, operator, employee)
+//
+// DOC-57 - Flow A, "Self Password Change". Deliberately the ONE endpoint
+// this task's forced-change middleware (middleware/
+// requirePasswordChangeCompleted.js) never blocks (see routes/
+// auth.routes.js - this route never has that middleware composed into
+// its chain at all) - a user whose mustChangePassword is true must still
+// be able to reach this, or they could never clear that flag.
+//
+// Only reads currentPassword/newPassword/confirmPassword from the body -
+// an explicit, single-purpose read, not an allowlist-filtered spread, so
+// a payload containing passwordHash/role/organizationId/mustChangePassword/
+// isActive or anything else has structurally zero effect (task spec:
+// "Only the explicit password fields may be read"). Every ownership/
+// identity fact this endpoint acts on (WHICH user, their CURRENT
+// passwordHash) comes from a fresh `User.findById(req.user.userId)` read,
+// never from the request body or from req.user itself beyond `userId`.
+const changePassword = async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const { currentPassword, newPassword, confirmPassword } = body;
+
+    if (typeof currentPassword !== 'string' || currentPassword.length === 0) {
+      return res.status(400).json({ status: 'error', message: 'currentPassword is required.' });
+    }
+    if (typeof newPassword !== 'string' || newPassword.length === 0) {
+      return res.status(400).json({ status: 'error', message: 'newPassword is required.' });
+    }
+    if (typeof confirmPassword !== 'string' || confirmPassword.length === 0) {
+      return res.status(400).json({ status: 'error', message: 'confirmPassword is required.' });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ status: 'error', message: 'newPassword and confirmPassword do not match.' });
+    }
+
+    const passwordFormatError = validatePassword(newPassword);
+    if (passwordFormatError) {
+      return res.status(400).json({ status: 'error', message: passwordFormatError });
+    }
+
+    const user = await User.findById(req.user.userId);
+    if (!user) {
+      return res.status(404).json({ status: 'error', message: 'User not found.' });
+    }
+
+    const currentPasswordMatches = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!currentPasswordMatches) {
+      // 401, not 400 - this is genuinely an authentication failure (proving
+      // you are still the account owner), the same status Login already
+      // uses for "credentials did not match", documented choice per task
+      // spec's "document the choice" instruction.
+      return res.status(401).json({ status: 'error', message: 'Current password is incorrect.' });
+    }
+
+    // task spec: "newPassword must not equal currentPassword" - compared
+    // against the real stored hash, never a client-supplied claim about
+    // what the old password was.
+    const newPasswordMatchesOld = await bcrypt.compare(newPassword, user.passwordHash);
+    if (newPasswordMatchesOld) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'New password must be different from your current password.',
+      });
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+    // Self-change always clears the forced-change flag, regardless of
+    // whatever it was before - this is the ONLY way (besides a fresh
+    // Manager reset re-setting it) this field ever changes value.
+    user.mustChangePassword = false;
+    await user.save();
+
+    return res.status(200).json({ status: 'success', data: sanitizeUser(user) });
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ status: 'error', message: error.message });
+    }
+    return next(error);
+  }
+};
+
 // SALT_ROUNDS / EMAIL_REGEX / MIN_PASSWORD_LENGTH are exported so other
 // trusted server-side entry points (scripts/seedSystemAdmin.js,
 // controllers/organization.controller.js) validate email/password and hash
 // passwords the exact same way as public registration, instead of
-// duplicating these rules in a second place.
-module.exports = { register, login, getMe, sanitizeUser, SALT_ROUNDS, EMAIL_REGEX, MIN_PASSWORD_LENGTH };
+// duplicating these rules in a second place. DOC-57 adds `validatePassword`
+// itself to this same export list, for the same reason.
+module.exports = {
+  register, login, getMe, changePassword, sanitizeUser, SALT_ROUNDS, EMAIL_REGEX, MIN_PASSWORD_LENGTH, validatePassword,
+};

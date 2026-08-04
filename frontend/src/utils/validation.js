@@ -8,3 +8,11 @@
 // out of sync with each other.
 export const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export const MIN_PASSWORD_LENGTH = 6;
+// DOC-57 - mirrors the backend's shared validator (backend/src/utils/
+// passwordPolicy.js) exactly - see that file's own comment for why this
+// is a new ceiling (the pre-DOC-57 policy had none) while
+// MIN_PASSWORD_LENGTH above stays unchanged. Used by the new Change
+// Password page and the Manager's Reset Password panel, both purely for
+// fast client-side feedback - the backend remains the sole authority and
+// re-validates independently regardless.
+export const MAX_PASSWORD_LENGTH = 128;

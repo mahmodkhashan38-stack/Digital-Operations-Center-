@@ -112,9 +112,64 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: true,
   },
+  // DOC-44 - Which Service Categories an Operator is responsible for
+  // (Electricity, Plumbing, ...). References ONLY - never a copy of the
+  // Category's name/isActive/etc, the same "store the id, not the data"
+  // rule organizationId itself already follows for Organization. Default
+  // is an empty array for every role: a brand-new Operator (just promoted
+  // from Employee, DOC-35) legitimately has zero specialties until a
+  // Manager assigns some - this is valid, not an error state (see
+  // controllers/user.controller.js's updateUserRole, which never requires
+  // a specialty to complete a promotion).
+  //
+  // Meaningful ONLY for role: 'operator'. The validator below enforces
+  // that every other role (employee/manager/system_admin) can never have
+  // a non-empty specialties array - not "hidden but present", genuinely
+  // empty - so nothing downstream (e.g. future Request-matching queries
+  // like `User.find({ role: 'operator', specialties: categoryId })`) can
+  // ever accidentally match a non-operator. This mirrors the existing
+  // organizationId validator's shape (role-conditional invariant enforced
+  // at the schema level, not just in controller code) and does not break
+  // any existing user document: every user created before DOC-44 simply
+  // has no `specialties` field yet, which Mongoose treats as `[]` (the
+  // schema default) the first time that document is loaded and saved -
+  // an empty array trivially satisfies the "must be empty for non-
+  // operators" rule, so no migration is required.
+  specialties: {
+    type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'ServiceCategory' }],
+    default: [],
+    validate: {
+      validator(value) {
+        if (this.role === 'operator') {
+          return true;
+        }
+        return !Array.isArray(value) || value.length === 0;
+      },
+      message: 'Only operator users may have service category specialties.',
+    },
+  },
   createdAt: {
     type: Date,
     default: Date.now,
+  },
+  // DOC-57 - "Secure Password Management". True only immediately after a
+  // Manager resets this user's password (controllers/user.controller.js's
+  // resetUserPassword) - a signal that the current passwordHash is a
+  // Manager-chosen value the user did not pick themselves, and must be
+  // replaced before this account can do anything else. Self-service
+  // password change (auth.controller.js's changePassword) always sets
+  // this back to `false` on success - that is the ONLY other place this
+  // field is ever written. Default `false` for every account created
+  // through every other path (registration, System Admin bootstrap,
+  // Manager account creation/replacement) - existing users, who have no
+  // value for this field at all yet, continue working exactly as before,
+  // since Mongoose applies this schema default the first time each of
+  // those documents is loaded, the same "empty/default is a valid
+  // pre-existing state, no migration required" pattern `specialties` and
+  // `attachments` already established.
+  mustChangePassword: {
+    type: Boolean,
+    default: false,
   },
 });
 

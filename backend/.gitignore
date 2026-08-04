@@ -10,3 +10,11 @@ npm-debug.log*
 *.bak
 *.orig
 *~
+
+# DOC-45 - runtime-uploaded Request images. Metadata lives in MongoDB;
+# the actual files are local-disk-only and never committed. .gitkeep
+# preserves the directory itself so a fresh clone has somewhere for
+# Multer to write to before ever needing UPLOAD_ROOT's own
+# fs.mkdirSync(..., { recursive: true }) fallback.
+uploads/requests/*
+!uploads/requests/.gitkeep

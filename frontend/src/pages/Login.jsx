@@ -10,6 +10,18 @@ import { destinationForRole } from '../utils/roleRoutes.js';
 // manager -> /manager (DOC-36), operator -> /operator (DOC-42), employee ->
 // /dashboard (DOC-42).
 
+// DOC-57 - a signed-in user whose password must still be changed (a
+// Manager reset, or any other mustChangePassword === true state) is
+// always sent to /change-password instead of their normal dashboard -
+// used both for an already-signed-in visitor landing back on /login and
+// for a fresh login submission below.
+function postLoginDestination(user) {
+  if (user?.mustChangePassword) {
+    return '/change-password';
+  }
+  return destinationForRole(user?.role);
+}
+
 function Login() {
   const navigate = useNavigate();
   const { login, isAuthenticated, isLoading, user } = useAuth();
@@ -20,7 +32,7 @@ function Login() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!isLoading && isAuthenticated) {
-    return <Navigate to={destinationForRole(user?.role)} replace />;
+    return <Navigate to={postLoginDestination(user)} replace />;
   }
 
   const handleChange = (event) => {
@@ -52,7 +64,11 @@ function Login() {
     setIsSubmitting(true);
     try {
       const loggedInUser = await login(formData);
-      navigate(destinationForRole(loggedInUser?.role));
+      // Login always succeeds even when mustChangePassword is true (task
+      // spec: "login still succeeds") - only the POST-login destination
+      // changes; the backend's own requirePasswordChangeCompleted
+      // middleware is what actually blocks every normal route afterward.
+      navigate(postLoginDestination(loggedInUser));
     } catch (error) {
       setServerError(error.message);
     } finally {
