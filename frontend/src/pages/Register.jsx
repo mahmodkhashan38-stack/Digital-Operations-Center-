@@ -124,6 +124,7 @@ function Register() {
                 id="fullName"
                 name="fullName"
                 type="text"
+                autoComplete="name"
                 placeholder="John Doe"
                 value={formData.fullName}
                 onChange={handleChange}
@@ -145,6 +146,7 @@ function Register() {
                 id="email"
                 name="email"
                 type="email"
+                autoComplete="email"
                 placeholder="you@example.com"
                 value={formData.email}
                 onChange={handleChange}
@@ -166,6 +168,7 @@ function Register() {
                 id="password"
                 name="password"
                 type="password"
+                autoComplete="new-password"
                 placeholder="••••••••"
                 value={formData.password}
                 onChange={handleChange}
@@ -187,6 +190,7 @@ function Register() {
                 id="confirmPassword"
                 name="confirmPassword"
                 type="password"
+                autoComplete="new-password"
                 placeholder="••••••••"
                 value={formData.confirmPassword}
                 onChange={handleChange}

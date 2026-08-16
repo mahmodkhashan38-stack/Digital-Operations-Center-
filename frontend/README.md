@@ -620,3 +620,44 @@ expanded detail panel - no second create page, no modal library.
 - **Not implemented here (by design):** any image cropping/editing UI,
   drag-and-drop reordering, a lightbox/carousel component (a plain new-tab
   full-image link is used instead), and attachments on comments.
+
+> **Storage backend update**: the backend now additionally supports
+> S3-compatible object storage (alongside MongoDB GridFS and legacy
+> local disk) for where an image's actual bytes are stored - see
+> `backend/README.md`'s "S3 Image Storage Migration" section for the
+> full writeup. This required **zero changes here** - every image still
+> loads through the exact same `AuthenticatedRequestImage.jsx`
+> fetch-as-blob component and the exact same content-delivery URL
+> (`attachment.url`) regardless of which backend actually stored it;
+> the frontend has never needed to know or care where an image lives.
+
+## Security & HTTPS
+
+Full writeup lives in `backend/README.md`'s own "Security & HTTPS"
+section - this is the short, frontend-specific summary.
+
+- **Why your password appears in DevTools → Network → Login → Payload**:
+  that's your own browser showing you the request it just built from
+  what you typed - normal for every site, not something this project
+  tries to hide. The real protection against another person on the same
+  network reading it is HTTPS, not hiding it from your own DevTools.
+- **`VITE_API_BASE_URL`** (`services/api.js`) is PUBLIC client
+  configuration - every `VITE_`-prefixed variable is bundled into the
+  browser build and visible to anyone who opens it. Never put a secret
+  in a `VITE_*` variable. Local development uses
+  `http://localhost:5000/api` (safe - same machine, no network in
+  between); **production must use `https://...`** - an `https://`
+  frontend calling an `http://` API is a browser mixed-content error,
+  and separately sends every request, including login, unencrypted.
+- **No password is ever persisted** to `localStorage`, `sessionStorage`,
+  or anywhere else after a request completes - `context/AuthContext.jsx`
+  only ever persists the JWT token (`doc_auth_token`), never a password
+  value. This was verified again as part of the security hardening pass
+  (repo-wide grep, no `console.log` of any form field anywhere in
+  `src/`).
+- **Optional dev-server HTTPS** (LAN testing): `DEV_HTTPS_ENABLED`,
+  `DEV_SSL_CERT_PATH`, `DEV_SSL_KEY_PATH` in `frontend/.env` (see
+  `.env.example`) - deliberately NOT `VITE_`-prefixed, since these
+  configure the Vite dev server itself (read in `vite.config.js`'s own
+  Node context), never the browser bundle. Off by default; `npm run dev`
+  is unaffected unless you opt in.
