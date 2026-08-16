@@ -19,8 +19,22 @@ const mongoose = require('mongoose');
 //     PATCH /api/requests/:id/cancel - never through DOC-12's generic
 //     status endpoint).
 //   DOC-45 added image attachments (see `attachments` below) - metadata
-//     only, the actual files live on local disk under
-//     middleware/upload.js's UPLOAD_ROOT, never as base64 in MongoDB.
+//     only, never as base64 in MongoDB. Originally the actual bytes lived
+//     ONLY on local disk under middleware/upload.js's UPLOAD_ROOT; the
+//     GridFS migration (see `fileId` below) adds MongoDB GridFS
+//     ("requestImages" bucket, services/gridFsStorage.js) as the storage
+//     backend for every NEW attachment, while every attachment created
+//     before the migration keeps working unchanged from its existing
+//     local-disk `storedName` - both forms coexist indefinitely, images
+//     are still never stored as base64 either way.
+//   S3 MIGRATION added `objectKey` - S3-compatible object storage
+//     (services/requestImageStorage.js) as a THIRD coexisting storage
+//     backend, the new default for new uploads once
+//     IMAGE_STORAGE_PROVIDER=s3 is configured. Existing GridFS (`fileId`)
+//     and legacy local-disk (`storedName`) attachments are completely
+//     unaffected and keep working forever - MongoDB still only ever
+//     stores safe metadata (never the image bytes, never AWS
+//     credentials), exactly as before.
 const MIN_TITLE_LENGTH = 5;
 const MAX_TITLE_LENGTH = 150;
 const MIN_DESCRIPTION_LENGTH = 10;
@@ -55,12 +69,26 @@ const MAX_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024;
 
 // One attachment's metadata only - never the image bytes themselves
 // (task spec section 3: "Do not store raw image base64 data in
-// MongoDB"). `storedName` is the generated-UUID filename actually on
-// disk (middleware/upload.js) - never the client's original filename,
-// which is preserved separately as `originalName` purely for display.
-// `url` is always a safe, root-relative path under the controlled static
-// route (app.js's `/api/uploads/requests`) - never an absolute
-// filesystem path (task spec section 3/10).
+// MongoDB"). `originalName` is the client's original filename, preserved
+// purely for display - never used to build a storage path either way.
+//
+// GRIDFS MIGRATION - two storage references now coexist on this
+// subdocument, exactly one of which is ever populated on a given
+// attachment (enforced by the pre('validate') hook below):
+//   - `fileId`: a GridFS file ObjectId in the "requestImages" bucket
+//     (services/gridFsStorage.js) - every attachment created by the
+//     GridFS-backed upload path from this migration onward.
+//   - `storedName`: the generated-UUID filename actually on local disk
+//     (middleware/upload.js's UPLOAD_ROOT) - only ever present on
+//     attachments created BEFORE this migration (legacy compatibility).
+//     Never written by new uploads.
+// `url` is no longer required and no longer trusted as the outward-
+// facing URL - sanitizeRequest (request.controller.js) always computes
+// the outward `url` dynamically for both legacy and GridFS attachments
+// alike, pointing at the authenticated content-delivery endpoint
+// (GET /api/requests/:requestId/attachments/:attachmentId/content). This
+// stored field is kept only as an internal historical value for legacy
+// attachments and is never read by sanitizeRequest anymore.
 const attachmentSchema = new mongoose.Schema(
   {
     originalName: {
@@ -71,8 +99,27 @@ const attachmentSchema = new mongoose.Schema(
     },
     storedName: {
       type: String,
-      required: true,
       trim: true,
+      default: null,
+    },
+    fileId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+    // S3 MIGRATION - the S3 object key for every NEW attachment created
+    // while IMAGE_STORAGE_PROVIDER=s3 (see
+    // services/requestImageStorage.js). Server-generated only (never from
+    // req.body) - see that module's buildObjectKey for the exact
+    // organizations/{orgId}/requests/{requestId}/before|completion/{uuid}.ext
+    // shape. Which of `objectKey`/`fileId`/`storedName` is populated is
+    // exactly how the current storage backend for THIS attachment is
+    // determined - never a separate, redundant "storageProvider" field
+    // that could drift out of sync (see requestImageStorage.js's own top
+    // comment for the full rationale).
+    objectKey: {
+      type: String,
+      trim: true,
+      default: null,
     },
     mimeType: {
       type: String,
@@ -87,8 +134,8 @@ const attachmentSchema = new mongoose.Schema(
     },
     url: {
       type: String,
-      required: true,
       trim: true,
+      default: null,
     },
     uploadedAt: {
       type: Date,
@@ -97,6 +144,21 @@ const attachmentSchema = new mongoose.Schema(
   },
   { _id: true },
 );
+
+// Defense in depth (mirrors the controller's own construction, which
+// never builds an attachment with none of the three references) - a
+// subdocument with no storage reference at all is a data-integrity bug,
+// not a valid state, regardless of which code path produced it.
+// S3 MIGRATION - extended to also accept `objectKey` (S3) alongside the
+// pre-existing `fileId` (GridFS) / `storedName` (legacy local disk) - a
+// pure-S3 attachment legitimately has neither of the other two.
+function ensureStorageReference(next) {
+  if (!this.fileId && !this.storedName && !this.objectKey) {
+    this.invalidate('storedName', 'An attachment must reference a GridFS fileId, a legacy storedName, or an S3 objectKey.');
+  }
+  next();
+}
+attachmentSchema.pre('validate', ensureStorageReference);
 
 // DOC-56 - "Operator Completion Proof Images". A completely SEPARATE
 // attachment collection from `attachments` above - never the same array,
@@ -110,6 +172,11 @@ const attachmentSchema = new mongoose.Schema(
 // unlike every other field on this subdocument, since a completion image
 // with no known uploader would be a data-integrity bug, not a normal
 // historical state.
+// GRIDFS MIGRATION - same `fileId`/`storedName` coexistence, and the same
+// no-longer-trusted `url`, as `attachmentSchema` above (see its own
+// comment for the full rationale). `uploadedBy` is unaffected by the
+// migration - always the assigned Operator's own User _id, required
+// exactly as before.
 const completionAttachmentSchema = new mongoose.Schema(
   {
     originalName: {
@@ -120,8 +187,19 @@ const completionAttachmentSchema = new mongoose.Schema(
     },
     storedName: {
       type: String,
-      required: true,
       trim: true,
+      default: null,
+    },
+    fileId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+    // S3 MIGRATION - see attachmentSchema's own `objectKey` comment above;
+    // identical field, identical rationale.
+    objectKey: {
+      type: String,
+      trim: true,
+      default: null,
     },
     mimeType: {
       type: String,
@@ -136,8 +214,8 @@ const completionAttachmentSchema = new mongoose.Schema(
     },
     url: {
       type: String,
-      required: true,
       trim: true,
+      default: null,
     },
     uploadedAt: {
       type: Date,
@@ -151,6 +229,7 @@ const completionAttachmentSchema = new mongoose.Schema(
   },
   { _id: true },
 );
+completionAttachmentSchema.pre('validate', ensureStorageReference);
 
 const requestSchema = new mongoose.Schema(
   {

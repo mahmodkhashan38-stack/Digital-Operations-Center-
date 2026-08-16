@@ -81,6 +81,31 @@ const upload = multer({
   },
 });
 
+// GRIDFS MIGRATION - a SECOND Multer instance, reusing the exact same
+// fileFilter/limits as the legacy disk-storage `upload` above (migration
+// task spec: "prefer Multer memoryStorage() for new GridFS uploads...
+// do NOT write new files to local disk first unless absolutely
+// necessary"). Every NEW Before/Completion Image upload
+// (request.controller.js's createRequest, addRequestAttachments,
+// addCompletionImages) is wired to THIS instance instead of `upload` -
+// `req.file(s).buffer` holds the raw bytes in memory only (bounded by
+// the same MAX_FILE_SIZE_BYTES/MAX_FILES_PER_REQUEST limits, so this
+// never reads more into memory than the legacy path already validated
+// as acceptable), streamed straight to GridFS
+// (services/gridFsStorage.js) and never touching local disk at all.
+// `upload` above is left completely untouched - still exported, still
+// used by nothing new - purely so the legacy local-disk read/serve path
+// (app.js's static mount, the historical migration script) keeps
+// working unchanged while both storage backends coexist.
+const uploadMemory = multer({
+  storage: multer.memoryStorage(),
+  fileFilter,
+  limits: {
+    fileSize: MAX_FILE_SIZE_BYTES,
+    files: MAX_FILES_PER_REQUEST,
+  },
+});
+
 // Deletes files Multer already wrote to disk for a request - used both by
 // the error-wrapper below (a rejected upload) and by controllers after a
 // LATER failure (invalid title/description/Category, a database error, or
@@ -90,6 +115,12 @@ const upload = multer({
 // handled, and a file that is already gone is not itself a problem.
 function cleanupUploadedFiles(files) {
   (files || []).forEach((file) => {
+    // GRIDFS MIGRATION - memoryStorage files (uploadMemory above) have no
+    // `.path` at all (their bytes only ever exist in `.buffer`, never on
+    // disk), so there is nothing to unlink for them - this is a safe,
+    // silent no-op, not a bug. Only disk-storage files (`upload`'s
+    // legacy instance) ever reach the fs.unlink call below.
+    if (!file || !file.path) return;
     fs.unlink(file.path, () => {});
   });
 }
@@ -128,6 +159,7 @@ function handleUpload(multerMiddleware) {
 
 module.exports = {
   upload,
+  uploadMemory,
   handleUpload,
   cleanupUploadedFiles,
   ALLOWED_MIME_TYPES,

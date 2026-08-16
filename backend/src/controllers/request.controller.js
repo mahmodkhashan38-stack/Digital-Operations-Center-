@@ -1,5 +1,3 @@
-const fs = require('fs');
-const path = require('path');
 const mongoose = require('mongoose');
 const Request = require('../models/Request');
 const ServiceCategory = require('../models/ServiceCategory');
@@ -8,7 +6,8 @@ const { canTransitionRequestStatus } = require('../utils/requestStatusTransition
 const {
   validateTitle, validateDescription, validatePriority, validateCancelReason,
 } = require('../utils/requestFieldValidation');
-const { cleanupUploadedFiles, UPLOAD_ROOT } = require('../middleware/upload');
+const { cleanupUploadedFiles } = require('../middleware/upload');
+const requestImageStorage = require('../services/requestImageStorage');
 const { buildRequestQuery, sortRequestDocs, buildCreatedAtRangeFilter } = require('../utils/requestQueryBuilder');
 const { computeRequestStatistics, computeOperatorWorkload, computeSlaStatistics } = require('../utils/requestStatistics');
 const { findDuplicateRequests } = require('../utils/duplicateRequestDetection');
@@ -101,6 +100,20 @@ const MAX_ORIGINAL_NAME_LENGTH = 255;
 // true by the invariant above) - if it somehow does not hold, this falls
 // back to the id alone with a generic label rather than crashing or
 // silently mis-attributing the image to the wrong person.
+// GRIDFS MIGRATION - the outward `url` for every attachment (Before AND
+// Completion Images alike, legacy local-disk AND GridFS alike) is now
+// ALWAYS computed dynamically here, pointing at the authenticated
+// content-delivery endpoint (getRequestAttachmentContent above) - never
+// the attachment's own stored `url` field (which legacy attachments
+// still have, but which is no longer read for this purpose at all, and
+// which new attachments do not even populate). This is what lets
+// legacy and GridFS-backed attachments share one identical outward
+// contract - the frontend never needs to know or care which storage
+// backend produced a given image (task spec: "prefer url as the stable
+// abstraction"). Root-relative, matching every other requestApi path
+// (frontend prepends API_BASE_URL, which already includes `/api`).
+const buildAttachmentContentUrl = (requestId, attachmentId) => `/requests/${requestId}/attachments/${attachmentId}/content`;
+
 const sanitizeRequest = (request, category, assignedOperator, createdByUser, cancelledByUser) => ({
   id: request._id,
   title: request.title,
@@ -115,7 +128,7 @@ const sanitizeRequest = (request, category, assignedOperator, createdByUser, can
     originalName: attachment.originalName,
     mimeType: attachment.mimeType,
     size: attachment.size,
-    url: attachment.url,
+    url: buildAttachmentContentUrl(request._id, attachment._id),
     uploadedAt: attachment.uploadedAt,
   })),
   completionAttachments: (request.completionAttachments || []).map((attachment) => ({
@@ -123,7 +136,7 @@ const sanitizeRequest = (request, category, assignedOperator, createdByUser, can
     originalName: attachment.originalName,
     mimeType: attachment.mimeType,
     size: attachment.size,
-    url: attachment.url,
+    url: buildAttachmentContentUrl(request._id, attachment._id),
     uploadedAt: attachment.uploadedAt,
     uploadedBy: (assignedOperator && String(assignedOperator._id) === String(attachment.uploadedBy))
       ? { id: assignedOperator._id, fullName: assignedOperator.fullName }
@@ -144,44 +157,133 @@ const sanitizeRequest = (request, category, assignedOperator, createdByUser, can
   updatedAt: request.updatedAt,
 });
 
-// Builds trusted attachment metadata from Multer's `req.files` - never
-// from anything in `req.body` (task spec section 7: "Do not accept
-// attachment metadata directly from req.body. The server generates
-// trusted metadata."). `originalName` is truncated defensively (schema
-// caps it at 255 characters) but is otherwise only ever used for
-// display - it never touches the filesystem. `storedName`/`url` both
-// come from Multer's own generated filename (middleware/upload.js),
-// never the client's original filename. `_id` is generated explicitly
-// here (rather than relying on Mongoose's own subdocument auto-_id
-// behavior) so `removeRequestAttachment`'s find-by-id lookup is
-// deterministic and independent of the underlying persistence layer.
-function buildAttachmentMetadata(files) {
-  return (files || []).map((file) => ({
-    _id: new mongoose.Types.ObjectId(),
-    originalName: file.originalname.slice(0, MAX_ORIGINAL_NAME_LENGTH),
-    storedName: file.filename,
-    mimeType: file.mimetype,
-    size: file.size,
-    url: `/uploads/requests/${file.filename}`,
-  }));
+// S3 MIGRATION - best-effort deletion of one or more newly-uploaded
+// attachments' underlying storage objects, used ONLY as failure-path
+// rollback (task spec: "If S3 upload succeeds but Request save fails,
+// delete the newly-created S3 object. No orphans." - the same rule this
+// controller already applied to GridFS, now generalized across all three
+// backends via requestImageStorage.deleteImage). Never touches any
+// attachment other than the exact ones passed in - a previously-existing,
+// already-saved attachment on this or any other Request is never in this
+// list, so this can never delete anything but what THIS failed operation
+// itself just created. Errors are logged, never thrown - a cleanup
+// failure must never mask the original error that triggered it. Accepts
+// full attachment objects (not just ids) because which storage backend
+// each one used is determined by requestImageStorage.deleteImage from the
+// attachment's own objectKey/fileId/storedName - a bare id alone would
+// not be enough to know which backend to delete from.
+async function cleanupNewlyUploadedAttachments(attachments) {
+  await Promise.all((attachments || []).filter(Boolean).map((attachment) => requestImageStorage.deleteImage(attachment)));
 }
 
-// DOC-56 - identical shape to buildAttachmentMetadata above, PLUS
-// `uploadedBy` - always the calling Operator's own `req.user.userId`
-// (task spec: "uploadedBy must always equal the assigned Operator"),
-// never anything read from req.body (protected-field-injection is
-// structurally impossible here - this function does not accept a body at
-// all, only `files` and the trusted server-side `uploadedByUserId`).
-function buildCompletionAttachmentMetadata(files, uploadedByUserId) {
-  return (files || []).map((file) => ({
-    _id: new mongoose.Types.ObjectId(),
-    originalName: file.originalname.slice(0, MAX_ORIGINAL_NAME_LENGTH),
-    storedName: file.filename,
-    mimeType: file.mimetype,
-    size: file.size,
-    url: `/uploads/requests/${file.filename}`,
-    uploadedBy: uploadedByUserId,
-  }));
+// S3 MIGRATION - deletes a single attachment's underlying stored bytes.
+// Delegates entirely to requestImageStorage.deleteImage, which branches on
+// whichever storage reference the attachment actually has - `objectKey`
+// (S3, every new attachment while IMAGE_STORAGE_PROVIDER=s3), `fileId`
+// (GridFS, every new attachment before this task, or while
+// IMAGE_STORAGE_PROVIDER=gridfs), or `storedName` (legacy local disk,
+// pre-GridFS-migration attachments only). Always called with an
+// attachment subdocument that was ALREADY found on the AUTHORIZED
+// Request's own `attachments`/`completionAttachments` array
+// (removeRequestAttachment/removeCompletionImage below) - never with a
+// client-supplied objectKey/fileId/storedName directly, so this can never
+// be used to delete storage belonging to a different Request.
+async function deleteAttachmentStorage(attachment) {
+  await requestImageStorage.deleteImage(attachment);
+}
+
+// Uploads each file's buffer (Multer memoryStorage's `req.files` - never
+// a filesystem path, never base64) to the "requestImages" GridFS bucket
+// and builds trusted attachment metadata referencing the new `fileId` -
+// never from anything in `req.body` (task spec section 7: "Do not
+// accept attachment metadata directly from req.body. The server
+// generates trusted metadata."). `originalName` is truncated defensively
+// (schema caps it at 255 characters) but is otherwise only ever used for
+// display - it never touches the filesystem or GridFS storage
+// identifier. `_id` is generated explicitly here (rather than relying on
+// Mongoose's own subdocument auto-_id behavior) so
+// `removeRequestAttachment`'s find-by-id lookup is deterministic and
+// independent of the underlying persistence layer.
+//
+// GridFS file metadata (`organizationId`/`requestId`/`attachmentType`/
+// `uploadedBy`) is always the trusted server-side context passed in by
+// the caller - never read from req.body (task spec: "always derived
+// server-side, never trusted from frontend").
+//
+// FAILURE CLEANUP: if any file in a multi-file batch fails to upload,
+// every file THIS call already uploaded successfully is deleted before
+// the error propagates - never left orphaned, and this never touches
+// any attachment from a different, already-completed call (task spec's
+// failure-cleanup section: "If multiple files uploaded and one fails,
+// clean up only the newly-created GridFS files from THAT failed
+// operation").
+async function buildAttachmentMetadata(files, { organizationId, requestId, uploadedBy }) {
+  const built = [];
+  try {
+    // eslint-disable-next-line no-restricted-syntax
+    for (const file of (files || [])) {
+      const originalName = file.originalname.slice(0, MAX_ORIGINAL_NAME_LENGTH);
+      // eslint-disable-next-line no-await-in-loop
+      const storageReference = await requestImageStorage.uploadImage(file.buffer, {
+        organizationId,
+        requestId,
+        attachmentType: 'before',
+        mimeType: file.mimetype,
+        originalName,
+        uploadedBy,
+      });
+      built.push({
+        _id: new mongoose.Types.ObjectId(),
+        originalName,
+        ...storageReference,
+        mimeType: file.mimetype,
+        size: file.size,
+      });
+    }
+    return built;
+  } catch (error) {
+    await cleanupNewlyUploadedAttachments(built);
+    throw error;
+  }
+}
+
+// DOC-56 - identical shape/behavior to buildAttachmentMetadata above
+// (including its own GridFS failure-cleanup), PLUS `uploadedBy` on each
+// returned attachment - always the calling Operator's own
+// `req.user.userId` (task spec: "uploadedBy must always equal the
+// assigned Operator"), never anything read from req.body
+// (protected-field-injection is structurally impossible here - this
+// function does not accept a body at all, only `files` and the trusted
+// server-side `organizationId`/`requestId`/`uploadedByUserId`).
+async function buildCompletionAttachmentMetadata(files, { organizationId, requestId, uploadedByUserId }) {
+  const built = [];
+  try {
+    // eslint-disable-next-line no-restricted-syntax
+    for (const file of (files || [])) {
+      const originalName = file.originalname.slice(0, MAX_ORIGINAL_NAME_LENGTH);
+      // eslint-disable-next-line no-await-in-loop
+      const storageReference = await requestImageStorage.uploadImage(file.buffer, {
+        organizationId,
+        requestId,
+        attachmentType: 'completion',
+        mimeType: file.mimetype,
+        originalName,
+        uploadedBy: uploadedByUserId,
+      });
+      built.push({
+        _id: new mongoose.Types.ObjectId(),
+        originalName,
+        ...storageReference,
+        mimeType: file.mimetype,
+        size: file.size,
+        uploadedBy: uploadedByUserId,
+      });
+    }
+    return built;
+  } catch (error) {
+    await cleanupNewlyUploadedAttachments(built);
+    throw error;
+  }
 }
 
 // POST /api/requests (employee only)
@@ -350,41 +452,76 @@ const createRequest = async (req, res, next) => {
     const createdAt = new Date();
     const slaDueAt = calculateSlaDueAt({ priority, createdAt });
 
+    // GRIDFS MIGRATION - the Request's own _id is generated up front
+    // (rather than left to Mongoose's default) so it can be included in
+    // each uploaded file's GridFS metadata (`requestId`) even though the
+    // Request document itself does not exist yet at upload time. This is
+    // the ONLY reason this id is pre-generated - Request.create below is
+    // told to use this exact _id via an explicit `_id` field, so the
+    // final document's id is unaffected either way.
+    const requestId = new mongoose.Types.ObjectId();
+
+    // Uploads run AFTER every validation/duplicate-detection check above
+    // has already passed - deliberately deferred this late (vs. the
+    // legacy disk-storage flow, where Multer had already written files
+    // before the controller even started) so a validation failure or a
+    // detected duplicate above never touches GridFS at all, and needs no
+    // cleanup. `attachments` comes exclusively from Multer's
+    // memoryStorage `req.files` (buildAttachmentMetadata) - never from
+    // req.body.
+    let attachments;
+    try {
+      attachments = await buildAttachmentMetadata(req.files, {
+        organizationId: req.user.organizationId,
+        requestId,
+        uploadedBy: req.user.userId,
+      });
+    } catch (error) {
+      return next(error);
+    }
+
     // Explicit server-side construction (GOOD pattern from the task spec) -
     // never `Request.create({ ...req.body })`. organizationId and
     // createdBy come exclusively from req.user (DOC-38's fresh per-request
     // context); status and assignedOperatorId are hardcoded to their
     // initial values and cannot be influenced by the request body at all,
-    // regardless of what it contains. `attachments` comes exclusively from
-    // Multer's `req.files` (buildAttachmentMetadata) - never from req.body.
-    const request = await Request.create({
-      title: body.title.trim(),
-      description: body.description.trim(),
-      categoryId: category._id,
-      priority,
-      status: 'open',
-      organizationId: req.user.organizationId,
-      createdBy: req.user.userId,
-      assignedOperatorId: null,
-      attachments: buildAttachmentMetadata(req.files),
-      createdAt,
-      slaDueAt,
-      slaPolicyHours: SLA_HOURS_BY_PRIORITY[priority],
-      slaBreachedAt: null,
-      resolvedAt: null,
-      closedAt: null,
-    });
+    // regardless of what it contains.
+    let request;
+    try {
+      request = await Request.create({
+        _id: requestId,
+        title: body.title.trim(),
+        description: body.description.trim(),
+        categoryId: category._id,
+        priority,
+        status: 'open',
+        organizationId: req.user.organizationId,
+        createdBy: req.user.userId,
+        assignedOperatorId: null,
+        attachments,
+        createdAt,
+        slaDueAt,
+        slaPolicyHours: SLA_HOURS_BY_PRIORITY[priority],
+        slaBreachedAt: null,
+        resolvedAt: null,
+        closedAt: null,
+      });
+    } catch (error) {
+      // Request.create() itself failed (e.g. a database error, or a
+      // schema validator rejecting something not already caught above) -
+      // every storage object just uploaded for this attempt (S3 or
+      // GridFS) must not be left orphaned (task spec's rollback/failure-
+      // handling section).
+      await cleanupNewlyUploadedAttachments(attachments);
+      if (error.name === 'ValidationError') {
+        return res.status(400).json({ status: 'error', message: error.message });
+      }
+      return next(error);
+    }
 
     // assignedOperatorId is always null at creation - no lookup needed.
     return res.status(201).json({ status: 'success', data: sanitizeRequest(request, category, null) });
   } catch (error) {
-    // Request.create() itself failed (e.g. a database error, or a schema
-    // validator rejecting something not already caught above) - any files
-    // Multer already wrote for this request must still be cleaned up.
-    cleanupUploadedFiles(req.files);
-    if (error.name === 'ValidationError') {
-      return res.status(400).json({ status: 'error', message: error.message });
-    }
     return next(error);
   }
 };
@@ -1143,8 +1280,24 @@ const addRequestAttachments = async (req, res, next) => {
       return res.status(400).json({ status: 'error', message });
     }
 
-    requestDoc.attachments.push(...buildAttachmentMetadata(req.files));
-    await requestDoc.save();
+    const newAttachments = await buildAttachmentMetadata(req.files, {
+      organizationId: req.user.organizationId,
+      requestId: requestDoc._id,
+      uploadedBy: req.user.userId,
+    });
+
+    requestDoc.attachments.push(...newAttachments);
+    try {
+      await requestDoc.save();
+    } catch (error) {
+      // S3 MIGRATION - requestDoc.save() failed AFTER the storage uploads
+      // above already succeeded (e.g. a schema validation error from
+      // pushing past this point) - only the objects THIS call just
+      // uploaded are cleaned up (S3 or GridFS, whichever this call used),
+      // never any of this Request's already-existing attachments.
+      await cleanupNewlyUploadedAttachments(newAttachments);
+      throw error;
+    }
 
     const category = await ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId });
 
@@ -1193,12 +1346,13 @@ const removeRequestAttachment = async (req, res, next) => {
     const [removedAttachment] = requestDoc.attachments.splice(attachmentIndex, 1);
     await requestDoc.save();
 
-    // Best-effort physical file removal - a file that is somehow already
-    // missing on disk must not corrupt or fail this response; the
-    // metadata removal above is what actually matters to the Request's
-    // stored state, and has already succeeded by this point.
-    const safeFileName = path.basename(removedAttachment.storedName);
-    fs.unlink(path.join(UPLOAD_ROOT, safeFileName), () => {});
+    // GRIDFS MIGRATION - deletes from GridFS or local disk depending on
+    // which storage reference this specific attachment has (see
+    // deleteAttachmentStorage's own comment). Uses ONLY the fileId/
+    // storedName already stored on THIS Request's own, already-authorized
+    // attachment - never a client-supplied identifier - so this can never
+    // delete a file belonging to another Request.
+    await deleteAttachmentStorage(removedAttachment);
 
     const category = await ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId });
 
@@ -1315,8 +1469,22 @@ const addCompletionImages = async (req, res, next) => {
       return res.status(400).json({ status: 'error', message });
     }
 
-    requestDoc.completionAttachments.push(...buildCompletionAttachmentMetadata(req.files, req.user.userId));
-    await requestDoc.save();
+    const newAttachments = await buildCompletionAttachmentMetadata(req.files, {
+      organizationId: req.user.organizationId,
+      requestId: requestDoc._id,
+      uploadedByUserId: req.user.userId,
+    });
+
+    requestDoc.completionAttachments.push(...newAttachments);
+    try {
+      await requestDoc.save();
+    } catch (error) {
+      // S3 MIGRATION - same rollback shape as addRequestAttachments: only
+      // the objects THIS call just uploaded are cleaned up, never any of
+      // this Request's already-existing completion images.
+      await cleanupNewlyUploadedAttachments(newAttachments);
+      throw error;
+    }
 
     const [category, assignedOperator] = await Promise.all([
       ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId }),
@@ -1369,12 +1537,11 @@ const removeCompletionImage = async (req, res, next) => {
     const [removedAttachment] = requestDoc.completionAttachments.splice(attachmentIndex, 1);
     await requestDoc.save();
 
-    // Best-effort physical file removal - a file that is somehow already
-    // missing on disk must not corrupt or fail this response; the
-    // metadata removal above is what actually matters to the Request's
-    // stored state, and has already succeeded by this point.
-    const safeFileName = path.basename(removedAttachment.storedName);
-    fs.unlink(path.join(UPLOAD_ROOT, safeFileName), () => {});
+    // GRIDFS MIGRATION - see deleteAttachmentStorage's own comment;
+    // branches on fileId (GridFS) vs storedName (legacy local disk),
+    // using only this already-authorized attachment's own stored
+    // reference.
+    await deleteAttachmentStorage(removedAttachment);
 
     const [category, assignedOperator] = await Promise.all([
       ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId }),
@@ -1386,6 +1553,141 @@ const removeCompletionImage = async (req, res, next) => {
     if (error.name === 'ValidationError') {
       return res.status(400).json({ status: 'error', message: error.message });
     }
+    return next(error);
+  }
+};
+
+// GRIDFS MIGRATION - "who may view this Request's image attachments" -
+// deliberately re-expressed here (not imported from
+// utils/commentAccess.js) even though it matches that file's own
+// hasRequestCommentAccess rule exactly today: viewing a Request's images
+// and viewing a Request's comments are two conceptually different
+// permissions that happen to share identical rules right now - keeping
+// them as two small, independent functions means a FUTURE change to one
+// (e.g. a role gaining comment access but not image access) never
+// silently changes the other's behavior too.
+//   employee  -> only the Request's own creator
+//   operator  -> only the Operator actually assigned to this Request
+//   manager   -> any Request inside their own Organization
+//   anything else (system_admin, or an unrecognized role) -> never -
+//     System Admin has no operational Request image access at all (task
+//     spec: "System Admin NO operational Request image access").
+function canViewRequestImages({
+  role, userId, requestCreatedBy, assignedOperatorId,
+}) {
+  if (role === 'employee') {
+    return String(requestCreatedBy) === String(userId);
+  }
+  if (role === 'operator') {
+    return !!assignedOperatorId && String(assignedOperatorId) === String(userId);
+  }
+  if (role === 'manager') {
+    return true;
+  }
+  return false;
+}
+
+// GET /api/requests/:requestId/attachments/:attachmentId/content
+// (Employee/Operator/Manager - NOT System Admin)
+//
+// GRIDFS MIGRATION - the ONE authenticated, authorized route through
+// which any Request image's actual bytes are ever streamed - the
+// replacement for app.js's old unauthenticated `/api/uploads/requests`
+// static mount for every NEW response `url` (see sanitizeRequest below).
+// That old static mount is deliberately left in place, unused by any
+// current response - removing it is a separate, later cleanup, not part
+// of this compatibility-first migration.
+//
+// Reachable by Employee (own Request only), Operator (assigned Request
+// only), Manager (any Request in their Organization) - never System
+// Admin, checked first and unconditionally, before any Request lookup
+// even runs (System Admin is org-less by design - task spec section 9's
+// established convention, same as listComments above).
+//
+// Looks for `attachmentId` in EITHER `attachments` (Before Images) or
+// `completionAttachments` (Completion Images) on the SAME authorized
+// Request - a caller does not need to know (and this response never
+// reveals) which collection a given id actually belongs to; both
+// "does not exist" and "belongs to a different Request" collapse into
+// the same generic 404, the same DOC-38 anti-enumeration convention
+// every other cross-role Request lookup in this controller already
+// uses for the Request document itself.
+//
+// S3 MIGRATION - streams from S3, GridFS, or the legacy local disk,
+// depending on which storage reference this specific attachment actually
+// has - never more than one, never buffers the whole file into memory
+// first (task spec's streaming/performance section) - delegated entirely
+// to requestImageStorage.getImageStream, the ONE place that knows how to
+// read from all three backends (Phase 13's "one stable frontend contract"
+// requirement: this endpoint's own request/response shape is completely
+// unaffected by which backend actually served a given image). Only ever
+// sets Content-Type/Content-Length/Content-Disposition from trusted,
+// already-validated metadata - never exposes an S3 bucket name, GridFS
+// chunk ids, a local filesystem path, or the client's own original
+// filename in any response header (task spec: "Do not use originalName
+// as an unsanitized response header").
+const getRequestAttachmentContent = async (req, res, next) => {
+  try {
+    if (req.user.role === 'system_admin') {
+      return res.status(403).json({ status: 'error', message: 'System Admin cannot access Request images.' });
+    }
+
+    const { requestId, attachmentId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(requestId) || !mongoose.Types.ObjectId.isValid(attachmentId)) {
+      return res.status(400).json({ status: 'error', message: 'Invalid id.' });
+    }
+
+    // Organization-scoped first - never findById() + a manual comparison
+    // - a nonexistent Request and one belonging to another Organization
+    // both produce the exact same 404.
+    const requestDoc = await Request.findOne({ _id: requestId, organizationId: req.user.organizationId });
+    if (!requestDoc) {
+      return res.status(404).json({ status: 'error', message: 'Request or image not found.' });
+    }
+
+    const authorized = canViewRequestImages({
+      role: req.user.role,
+      userId: req.user.userId,
+      requestCreatedBy: requestDoc.createdBy,
+      assignedOperatorId: requestDoc.assignedOperatorId,
+    });
+    if (!authorized) {
+      // Right Organization, wrong role/assignment - an honest 403, the
+      // same "right org, wrong assignee" shape commentAccess.js's own
+      // convention already documents (not a second 404 - Organization
+      // membership is already established by this point, so there is no
+      // cross-tenant enumeration risk left to protect against here).
+      return res.status(403).json({ status: 'error', message: 'You are not authorized to view this image.' });
+    }
+
+    const attachment = requestDoc.attachments.id(attachmentId) || requestDoc.completionAttachments.id(attachmentId);
+    if (!attachment) {
+      return res.status(404).json({ status: 'error', message: 'Request or image not found.' });
+    }
+
+    const imageStream = await requestImageStorage.getImageStream(attachment);
+    if (!imageStream) {
+      // Covers every "bytes not found" case uniformly - a missing S3
+      // object, a missing GridFS file, a missing local-disk file, or the
+      // defensive fallback for an attachment with no storage reference at
+      // all (should be unreachable given the model's own pre('validate')
+      // hook, but never trusted blindly here either).
+      return res.status(404).json({ status: 'error', message: 'Request or image not found.' });
+    }
+
+    res.setHeader('Content-Type', imageStream.contentType);
+    if (imageStream.contentLength) {
+      res.setHeader('Content-Length', String(imageStream.contentLength));
+    }
+    // Renders inline in the browser (the frontend already fetches this as
+    // a Blob and builds its own object URL - see
+    // AuthenticatedRequestImage.jsx) rather than forcing a download, and
+    // never derives this header from the client-supplied originalName.
+    res.setHeader('Content-Disposition', 'inline');
+
+    imageStream.stream.on('error', (error) => next(error));
+    return imageStream.stream.pipe(res);
+  } catch (error) {
     return next(error);
   }
 };
@@ -2041,6 +2343,7 @@ module.exports = {
   removeRequestAttachment,
   addCompletionImages,
   removeCompletionImage,
+  getRequestAttachmentContent,
   managerUpdateRequest,
   managerCancelRequest,
   managerCloseRequest,

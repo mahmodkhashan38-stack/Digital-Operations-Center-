@@ -3,7 +3,7 @@ const verifyToken = require('../middleware/auth');
 const requireRole = require('../middleware/requireRole');
 const requirePasswordChangeCompleted = require('../middleware/requirePasswordChangeCompleted');
 const { requireOrganizationMembership, requireActiveOrganization } = require('../middleware/organizationScope');
-const { upload, handleUpload, MAX_FILES_PER_REQUEST } = require('../middleware/upload');
+const { uploadMemory, handleUpload, MAX_FILES_PER_REQUEST } = require('../middleware/upload');
 const {
   createRequest,
   listMyRequests,
@@ -18,6 +18,7 @@ const {
   removeRequestAttachment,
   addCompletionImages,
   removeCompletionImage,
+  getRequestAttachmentContent,
   managerUpdateRequest,
   managerCancelRequest,
   managerCloseRequest,
@@ -36,7 +37,15 @@ const router = express.Router();
 // Request accept" check (existing + new <= 5) happens inside the
 // controller, which is the only place that knows a specific Request's
 // current attachment count.
-const uploadAttachments = handleUpload(upload.array('attachments', MAX_FILES_PER_REQUEST));
+//
+// GRIDFS MIGRATION - now backed by `uploadMemory` (multer.memoryStorage())
+// instead of the legacy disk-storage `upload` - every NEW upload's bytes
+// land in `req.files[i].buffer` only, never local disk, and are streamed
+// straight to GridFS by the controller (services/gridFsStorage.js). The
+// legacy `upload` instance still exists in middleware/upload.js, just no
+// longer wired to any route on this router - GET .../content (below) is
+// what still reads pre-migration attachments back off local disk.
+const uploadAttachments = handleUpload(uploadMemory.array('attachments', MAX_FILES_PER_REQUEST));
 
 // DOC-56 - a SECOND, independent Multer instance for completion-proof
 // images, reusing the exact same underlying configuration (task spec:
@@ -47,8 +56,9 @@ const uploadAttachments = handleUpload(upload.array('attachments', MAX_FILES_PER
 // `completionAttachments` array) - a client can never accidentally (or
 // deliberately) populate the wrong collection just by choosing a
 // different field name, since each route below only ever wires up one of
-// these two Multer instances.
-const uploadCompletionAttachments = handleUpload(upload.array('completionAttachments', MAX_FILES_PER_REQUEST));
+// these two Multer instances. Also memoryStorage-backed - see
+// `uploadAttachments`'s own comment above.
+const uploadCompletionAttachments = handleUpload(uploadMemory.array('completionAttachments', MAX_FILES_PER_REQUEST));
 
 // DOC-12 - registered BEFORE the blanket requireRole('employee') gate
 // below, the same way organization.routes.js's GET /me and
@@ -97,6 +107,29 @@ router.post(
   requireOrganizationMembership,
   requireActiveOrganization,
   createComment,
+);
+
+// GRIDFS MIGRATION - the authenticated image-content-delivery endpoint,
+// registered here (ahead of the blanket Employee-only gate below) for
+// the exact same reason as GET/POST .../comments right above it: it is
+// reachable by Employee, Operator, AND Manager (three different
+// rulesets, System Admin explicitly rejected inside the controller) - no
+// single-role chain can express that. `:requestId`/`:attachmentId` are
+// both distinct path parameter names from this router's other `/:id`-
+// shaped routes purely for readability inside the controller - Express
+// itself does not require consistent parameter naming across routes.
+// This route's own trailing `/content` segment means it can never
+// collide with the existing Employee-only
+// `/:id/attachments/:attachmentId` DELETE route further down (different
+// HTTP method AND a different number of path segments), regardless of
+// registration order.
+router.get(
+  '/:requestId/attachments/:attachmentId/content',
+  verifyToken,
+  requirePasswordChangeCompleted,
+  requireOrganizationMembership,
+  requireActiveOrganization,
+  getRequestAttachmentContent,
 );
 
 // DOC-52 - Manager assignment + the two whole-list endpoints, all

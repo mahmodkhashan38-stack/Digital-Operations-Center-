@@ -1,7 +1,31 @@
 node_modules/
 node_modules_broken*/
 
+# Environment variables - ignore every real env file, but keep the
+# committed, placeholder-only .env.example trackable. The negation MUST
+# come after the broader .env.* pattern it un-ignores.
 .env
+.env.local
+.env.*.local
+.env.*
+!.env.example
+
+# Secrets / credentials - defense in depth. No file matching these exists
+# in this project today; this only prevents one from ever being committed
+# by accident in the future.
+secrets.json
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+# Local/dev TLS certificate directory (SSL_CERT_PATH/SSL_KEY_PATH from
+# .env conventionally point here) - security hardening (passwords/HTTPS).
+# No certificate authority or production certificate is ever committed;
+# a real deployment's TLS material lives in its own secret store, never
+# in this repository.
+certs/
+*.crt
 
 npm-debug.log*
 *.log

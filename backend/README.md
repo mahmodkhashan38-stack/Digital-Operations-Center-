@@ -13,17 +13,101 @@ Node.js, Express and MongoDB backend.
   is safe to run multiple times. See the comment header in
   `scripts/migrateUsersToOrganizations.js` for full details.
 - `npm run seed:system-admin` - bootstraps the single global System Admin
-  account (DOC-31). Reads `SYSTEM_ADMIN_EMAIL`, `SYSTEM_ADMIN_PASSWORD` and
+  account (DOC-31). The FIRST time it runs (no System Admin exists yet), it
+  reads `SYSTEM_ADMIN_EMAIL`, `SYSTEM_ADMIN_PASSWORD` and
   `SYSTEM_ADMIN_FULL_NAME` from `backend/.env` (see `.env.example` for the
   placeholder keys - never commit real values), hashes the password with
   bcrypt exactly like public registration does, and creates a user with
   `role: 'system_admin'` and `organizationId: null`. The System Admin can
   **only** be created this way - the public `/api/auth/register` endpoint
   always forces `role: 'employee'` and ignores anything else the client
-  sends. Safe to run more than once: if a System Admin already exists it
-  does nothing (or reports a conflict if the existing one has a different
-  email - it never guesses or promotes an existing account). See the
-  comment header in `scripts/seedSystemAdmin.js` for full details.
+  sends. Safe to run more than once: if a System Admin already exists, the
+  script checks that FIRST and does nothing (or reports a conflict if the
+  existing one has a different, explicitly-set email - it never guesses or
+  promotes an existing account) - critically, this "already exists"
+  no-op path never reads or requires `SYSTEM_ADMIN_PASSWORD` at all, so it
+  is safe to remove that value from `backend/.env` once your System Admin
+  has been created. `SYSTEM_ADMIN_PASSWORD` is never read by normal server
+  startup (`npm start`) either - it is only ever used by this one,
+  separate, manually-invoked script, and only when actually creating the
+  first System Admin. See the comment header in `scripts/seedSystemAdmin.js`
+  for full details.
+
+## Password & Secrets Security
+
+A full password/secrets audit was performed (no application code path was
+found to leak any password/passwordHash/secret; see the fixes below for the
+handful of small, additive improvements that came out of it):
+
+- **`SYSTEM_ADMIN_PASSWORD`** is a one-time bootstrap/seed secret, read only
+  by `scripts/seedSystemAdmin.js`, server-side, from `backend/.env` - and,
+  as of the bootstrap-ordering refactor described above, only ever read
+  when that script is about to create the FIRST System Admin. It is never
+  read by normal server startup (`src/server.js` has no reference to it at
+  all), never sent to the frontend, never included in any API response or
+  JWT, and never logged (the seed script prints the created account's id/
+  fullName/email/role/organizationId, and an explicit "(Password is not
+  shown...)" line - never the password itself). It is genuinely "spent"
+  once the System Admin account exists: the seed script's own existence
+  check now runs BEFORE the password is ever read, so `SYSTEM_ADMIN_PASSWORD`
+  **can be safely deleted from `backend/.env`** after that point (a future
+  re-bootstrap of a fresh database would simply need it set again first).
+  In a real deployment it should come from your platform's secret manager,
+  not a committed file.
+- **`backend/.env`** (the real one, with real values) is listed in both the
+  root and `backend/.gitignore`, and is confirmed NOT tracked by git
+  (`git ls-files` never lists it, and no commit in this repository's entire
+  history has ever added a `.env` file - only `.env.example` files have
+  ever been committed).
+- **`backend/.env.example`** contains descriptive placeholders only
+  (`your_mongodb_connection_string`, `your_long_random_jwt_secret`,
+  `change_me_before_use`, ...) - never a real credential.
+- **User passwords** are always bcrypt-hashed (`SALT_ROUNDS`, shared from
+  `auth.controller.js`) before ever reaching MongoDB, on every account-
+  creation/password-change path (public registration, System Admin seed,
+  Manager-creates-Organization, Manager replaces Manager, self password
+  change, Manager resets a user's password) - the `User` model has no
+  plaintext `password`/`plainPassword`/`temporaryPassword` field, only
+  `passwordHash`.
+- **API responses** never include `passwordHash` - every User-serializing
+  response in the whole codebase goes through one shared, explicit-
+  allowlist sanitizer (`sanitizeUser` in `auth.controller.js`, reused by
+  `sanitizeUserWithSpecialties` in `user.controller.js` and directly by
+  `organization.controller.js`) or an equivalent explicit `{id, fullName,
+  role}`-only pick (`request.controller.js`'s creator/operator maps,
+  `comment.controller.js`'s `sanitizeComment`, `chat.controller.js`'s
+  `sanitizeChatMessage`) - never a raw Mongoose document or `.toObject()`
+  spread.
+- **The JWT** contains only `{ userId, role }` (`auth.controller.js`'s
+  single `jwt.sign` call) - no password, no passwordHash, no secrets.
+- **Logging**: no `console.log`/`console.error` anywhere in the backend
+  logs `req.body`, a password, a passwordHash, `JWT_SECRET`, or
+  `MONGODB_URI`. The centralized `errorHandler.js` logs the full error
+  server-side only, and always returns a generic "Internal Server Error"
+  to the client for any 5xx - stack traces and internal details are never
+  returned in a response.
+- **Frontend**: `localStorage` stores only the JWT token (`doc_auth_token`)
+  - never a password or the user object. There is no `console.log` anywhere
+  in the frontend source. No backend secret (`JWT_SECRET`, `MONGODB_URI`,
+  `SYSTEM_ADMIN_PASSWORD`) appears anywhere in frontend source, and the
+  only Vite environment variable in use, `VITE_API_BASE_URL`, is public
+  configuration (an API URL), never a secret - `VITE_`-prefixed variables
+  are bundled into the browser build and must never hold a secret.
+- **Password inputs** all use `type="password"`, with the appropriate
+  `autoComplete` hint (`current-password` for Login, `new-password` for
+  Register/Change Password/Manager Reset, `email`/`name` where relevant) so
+  the browser's own password manager behaves correctly.
+- **F12 / DevTools**: seeing `password` in Network → Request Payload during
+  Login/Register/Change Password is expected and unavoidable - the browser
+  must know the password to send it, and this is not a vulnerability by
+  itself. What would be a real problem - a password or passwordHash in an
+  API *response*, in the JWT payload, in `localStorage`, or in the
+  console - was checked for and not found anywhere in this codebase.
+- **HTTPS**: local development uses `http://localhost`, which is normal and
+  acceptable for local development. A production deployment of this
+  project must be served over HTTPS so credentials are encrypted in
+  transit between the browser and the server - this was not (and cannot
+  be) implemented as part of a local audit.
 
 ## Roles
 
@@ -1178,6 +1262,15 @@ value, `cancelled`, which is terminal.
 
 ### Add Image Attachments to Requests (DOC-45)
 
+> **Storage backend update:** every rule described in this section
+> (limits, ownership, eligibility, MIME types) is still exactly as
+> written below and unchanged. What changed is WHERE a NEW image's bytes
+> are stored: local disk (as described here) for every attachment created
+> before the GridFS migration, MongoDB GridFS for every attachment created
+> after it. Both kinds coexist and both work identically from the
+> frontend's point of view. See "GridFS Image Storage Migration" near the
+> end of this document for the full writeup.
+
 An Employee may attach up to 5 image files (JPEG/PNG/WEBP only, 5 MB max
 each) to their own Request - at creation, and afterward while it is still
 `open` and unassigned (the exact same eligibility DOC-46 established for
@@ -1660,6 +1753,11 @@ which reuse or overload the Employee-only endpoints DOC-46 already owns.
   No chart library was added.
 
 ## Operator Completion Proof Images (DOC-56)
+
+> **Storage backend update:** same note as DOC-45 above - every rule below
+> is unchanged; new completion images are now stored in MongoDB GridFS
+> instead of local disk. See "GridFS Image Storage Migration" near the end
+> of this document.
 
 Before this task, an Employee could attach images to a Request BEFORE any
 work happened (DOC-45's `attachments` array) - there was no way for the
@@ -2521,3 +2619,682 @@ the whole Organization and has nothing to do with any individual Request.
   `OrganizationChat.jsx`, `Navbar.jsx`, and `App.jsx`, and by `npx vite
   build` completing with no errors - the same verification depth every
   prior frontend-only claim in this project's test reports has used.
+
+## GridFS Image Storage Migration
+
+Request image attachments (DOC-45 Before Images, DOC-56 Completion
+Images) moved from local-disk-only storage to **MongoDB GridFS** as their
+storage backend. This was a compatibility-first migration: every existing
+Sprint 1-5 feature (Request creation, editing, cancellation, assignment,
+comments, SLA, search, statistics, duplicate detection, password
+management, organization isolation, chat) keeps working exactly as
+before, no existing uploaded file or attachment record was deleted, and
+attachments created before this migration continue to work forever
+without ever being migrated.
+
+- **Why GridFS, and why not base64-in-MongoDB**: storing raw image bytes
+  as a base64 string directly on the Request document was explicitly
+  ruled out (bloats the document, breaks the existing 16 MB BSON
+  document-size ceiling at scale, and makes the `attachments` array
+  slower to load even when a caller only wants the metadata). GridFS
+  stores each image as its own set of chunk documents in a dedicated
+  bucket, referenced from the Request document by a small ObjectId
+  (`fileId`) - the Request document itself stays exactly as small as it
+  was before.
+- **One bucket, no second connection**: `src/services/gridFsStorage.js`
+  is the single, sole owner of all GridFS access in this project. It
+  obtains a `GridFSBucket` (bucket name **`requestImages`**, so its
+  underlying collections are `requestImages.files`/`requestImages.chunks`)
+  via `mongoose.mongo.GridFSBucket`, reached through the SAME Mongoose
+  connection `src/config/db.js` already opens - no second MongoDB
+  connection is ever created. There is exactly one bucket for the whole
+  application; there are no per-Organization or per-Request buckets. The
+  bucket is created lazily (on first real use, after `connectDB()` has
+  already run) and cached.
+- **File metadata**: every GridFS file's own `metadata` field records
+  `{ organizationId, requestId, attachmentType, uploadedBy }`, where
+  `attachmentType` is always exactly `"before"` or `"completion"`. All
+  four values are always derived server-side from `req.user`/the Request
+  document being acted on - never trusted from the client.
+- **Request attachment schema** (`models/Request.js`) - both
+  `attachmentSchema` and `completionAttachmentSchema` gained a new
+  optional field, `fileId` (ObjectId, references a file in the
+  `requestImages` bucket). `storedName` (the legacy local-disk filename)
+  is now optional instead of required - a NEW attachment never populates
+  it, an attachment created before this migration still has it and no
+  `fileId`. A `pre('validate')` hook on both schemas enforces that every
+  saved attachment has at least one of the two storage references. `url`
+  is likewise no longer required/trusted as a stored value - see below.
+- **`url` is always computed dynamically**: `sanitizeRequest`
+  (`controllers/request.controller.js`) no longer returns an attachment's
+  own stored `url` field. Instead it always computes
+  `/requests/:requestId/attachments/:attachmentId/content` fresh, for
+  BOTH legacy and GridFS-backed attachments alike. This is what lets the
+  frontend treat every attachment identically regardless of which storage
+  backend actually produced it - it never needs to know about GridFS file
+  ids, bucket names, chunk collections, or local filesystem paths at all.
+- **Upload pipeline**: `middleware/upload.js` gained a second Multer
+  instance, `uploadMemory` (`multer.memoryStorage()`), reusing the exact
+  same `fileFilter`/`ALLOWED_MIME_TYPES`/`MAX_FILE_SIZE_BYTES` (5 MB)/
+  `MAX_FILES_PER_REQUEST` (5) as the original disk-storage `upload`
+  instance. `routes/request.routes.js` now wires every upload route
+  (`POST /`, `POST /:id/attachments`, `POST /:id/completion-images`) to
+  `uploadMemory` instead - a new upload's bytes exist only in
+  `req.files[i].buffer` in memory, streamed straight to GridFS, and never
+  touch local disk at all. The legacy `upload` (disk-storage) instance is
+  still exported from `middleware/upload.js` unchanged, purely so nothing
+  that still depends on reading a pre-migration local file breaks.
+- **Before Image / Completion Image rules unchanged**: every DOC-45 rule
+  (ownership, `open`+unassigned eligibility, 5-image cap, MIME/size
+  limits) and every DOC-56 rule (assigned-Operator-only,
+  `in_progress`-only, independent 5-image cap, resolve-requires-a-
+  completion-image gate) still apply exactly as documented above - the
+  migration only changed WHERE the bytes are stored, never WHO may
+  upload/remove an image or WHEN.
+- **Image delivery endpoint (new)**: `GET
+  /api/requests/:requestId/attachments/:attachmentId/content` -
+  authenticated (`verifyToken` + `requirePasswordChangeCompleted` +
+  `requireOrganizationMembership` + `requireActiveOrganization`, the same
+  chain every other cross-role Request endpoint uses), registered ahead
+  of this router's blanket Employee-only gate so Employee, Operator, AND
+  Manager tokens can all reach it (System Admin is explicitly rejected -
+  403, no operational Request image access at all, same rule as every
+  other Request endpoint). Looks the target attachment up inside EITHER
+  `attachments` or `completionAttachments` on a Request the caller is
+  independently authorized to view (Employee: only their own Request;
+  Operator: only a Request assigned to them; Manager: any Request in
+  their own Organization) - a nonexistent Request, a cross-Organization
+  Request, and a nonexistent attachment id are all indistinguishable
+  404s (the same DOC-38 anti-enumeration convention used everywhere
+  else); an existing Request the caller simply isn't allowed to view is a
+  403. Streams the image directly (GridFS `openDownloadStream` or a local
+  `fs.createReadStream`, whichever storage reference the specific
+  attachment has) - never buffers a whole file into memory, and only ever
+  sets `Content-Type`/`Content-Length`, never GridFS bucket/chunk
+  internals or a filesystem path.
+- **Why not a plain `<img src>` to that endpoint**: this project has no
+  cookie-based session - every API call authenticates via a JWT in an
+  `Authorization: Bearer <token>` header (`frontend/src/services/api.js`),
+  and a plain `<img src="...">` has no way to attach a custom header to
+  its own request. The frontend's new `AuthenticatedRequestImage.jsx`
+  component performs the authenticated `fetch()` itself, turns the
+  response into a `Blob`, and renders a `URL.createObjectURL(blob)`
+  instead (revoked on unmount/url change to avoid leaking memory across a
+  gallery) - the JWT is never placed in a query string or any other
+  weaker/permanent location. `RequestRow.jsx` (3 call sites) and
+  `ManagerRequestRow.jsx` (2 call sites) were updated to use it in place
+  of the old raw `<img src={...}>` markup; no other frontend file needed
+  to change.
+- **Legacy compatibility**: an attachment created before this migration
+  (`storedName` set, `fileId` absent) is never migrated automatically and
+  needs no server restart/backfill to keep working - the content-delivery
+  endpoint above reads straight from local disk for it, exactly as the
+  old `express.static` mount did. The old `/api/uploads/requests` static
+  mount (`app.js`) is left in place, completely unused by any new
+  response's `url` - a deliberate, low-risk "don't remove working code
+  before its replacement is proven" choice, not an oversight.
+- **Failure/rollback handling**: if a multi-file upload's GridFS write
+  succeeds for file 1 but fails for file 2, only file 1's just-uploaded
+  GridFS file is deleted (never anything from a previous, already-saved
+  upload). If every file uploads successfully but the following
+  `Request.create()`/`requestDoc.save()` fails, every GridFS file just
+  uploaded for that one attempt is deleted before the error response is
+  sent - no orphaned GridFS files are ever left behind by a failed
+  request. Deleting an attachment (`removeRequestAttachment`/
+  `removeCompletionImage`) always uses the fileId/storedName already
+  stored on the AUTHORIZED Request's own attachment subdocument - never a
+  client-supplied identifier - so it can never delete a file belonging to
+  a different Request.
+- **Migration script (optional, non-destructive)**:
+  `backend/scripts/migrateRequestImagesToGridFs.js`
+  (`npm run migrate:request-images-to-gridfs`) copies every remaining
+  legacy (local-disk-only) attachment's bytes into GridFS and sets its
+  `fileId`, while leaving `storedName`/`url`/every other field completely
+  untouched and NEVER deleting the original local file. Idempotent (an
+  attachment that already has a `fileId` can never be matched again on a
+  later run); a missing local file or a failed upload is reported and
+  skipped, never crashes the rest of the run; a `Request.save()` failure
+  after a successful GridFS upload rolls back just that document's
+  newly-uploaded GridFS files. This script is never run automatically -
+  `src/server.js` never requires it.
+- **File limits (unchanged)**: JPEG/PNG/WEBP only, 5 MB per image, 5
+  images per Request per collection (Before and Completion Images have
+  independent 5-image caps). Multer's `memoryStorage()` is safe to use
+  given this existing 5 MB ceiling - no file is ever read into memory
+  beyond what the original disk-storage path already accepted.
+- **Cleanup behavior**: this migration deliberately does NOT delete
+  `backend/uploads/requests/`, any historical image, or `.gitkeep` - the
+  directory remains required for as long as any legacy attachment still
+  references it (i.e. until every Organization has run the migration
+  script AND a separate, deliberate future decision is made to remove
+  local-disk support entirely). No file was deleted by this migration's
+  own testing.
+- **Known limitations / technical debt**: (1) the old unauthenticated
+  `/api/uploads/requests` static mount still exists in `app.js` - safe
+  (nothing advertises URLs pointing at it anymore) but not yet removed;
+  removing it is a separate, later cleanup once every Organization's
+  legacy attachments have actually been migrated. (2) There is currently
+  no scheduled/automatic run of the migration script - it is a manual,
+  explicit command. (3) GridFS chunk-level storage overhead (each file is
+  split into 255 KB chunks by default) was not benchmarked against raw
+  disk storage - not expected to matter at this project's scale, but not
+  measured.
+- **Real MongoDB / real GridFS limitation**: this sandboxed development
+  environment has no outbound network access at all (confirmed directly -
+  a DNS resolution attempt to the project's own MongoDB Atlas hostname,
+  and even to a plain `google.com` lookup, both failed with
+  `ECONNREFUSED`), so live GridFS persistence against the real project
+  database was NOT exercised. `services/gridFsStorage.js` was instead
+  tested against a fake, in-memory `GridFSBucket` substituted for
+  `mongoose.mongo.GridFSBucket` (the exact same substitution point a real
+  MongoDB driver instance would occupy) - this proves the service
+  module's own logic (upload/download/find/delete, streaming, metadata
+  handling, best-effort missing-file deletion) is correct, but does NOT
+  by itself prove the real MongoDB Atlas GridFS integration behaves
+  identically. This mirrors every other ticket in this project's session
+  history, all of which disclosed the same sandbox limitation.
+- **Test summary**: a temporary E2E suite (`backend/gridfs.e2e.test.tmp.js`,
+  deleted after this run) combined the project's established mocked-model
+  HTTP harness (`Module._load` interception, real unmodified `src/app.js`
+  served via `http.createServer` + native `fetch`) with the fake-GridFSBucket
+  substitution described above, covering: GridFS Storage (upload/download
+  roundtrip byte-for-byte, findFile metadata, delete, best-effort delete of
+  an already-missing file, correct bucket name - 9 checks); Before Images
+  (multi-image creation, response never leaks `fileId`/`storedName`, GridFS
+  actually receives the files, owner can view, a different same-org
+  Employee is rejected 403, adding more images to an existing Request - 9
+  checks); Completion Images (non-assigned Operator rejected, assigned
+  Operator succeeds, `uploadedBy` correct, Manager/Employee(owner) can view,
+  cross-org Manager gets 404, System Admin gets 403, remove deletes the
+  GridFS file - 12 checks); Failure Cleanup (a simulated `Request.create()`
+  failure and a simulated `requestDoc.save()` failure each roll back
+  exactly the GridFS file(s) that attempt just uploaded, with zero orphans
+  left behind - 4 checks); Legacy Compatibility (a hand-seeded
+  `storedName`-only/no-`fileId` attachment still gets a normal content URL,
+  streams correctly from local disk, and removing it deletes the local file
+  rather than attempting a GridFS lookup - 6 checks); and a Regression sweep
+  (unauthenticated access still 401, DOC-13 comments route still reachable,
+  DOC-12 status route still wired, Employee/Manager/Operator list and
+  statistics endpoints unaffected, organization isolation still holds on
+  the new image endpoint, malformed/nonexistent ids handled cleanly, the
+  legacy disk-storage Multer instance and static mount are both still
+  exported/present, and the full backend module graph still loads cleanly
+  - 15 checks). **All 55 assertions passed, 0 failed.**
+- **Frontend build verification**: `npx vite build` completed with no
+  errors after adding `AuthenticatedRequestImage.jsx` and updating
+  `RequestRow.jsx`/`ManagerRequestRow.jsx` - same verification depth as
+  every prior frontend change in this project.
+
+## Security & HTTPS
+
+This section explains the password-security model end to end, and the
+transport-security (HTTPS/TLS) architecture added on top of it. It exists
+because of a real question that came up during review: "why can I see my
+own password in DevTools → Network → Login → Payload?"
+
+### 1-3. Why the password appears in your own DevTools, and why that's not a leak
+
+When you type a password into the Login form and submit it, your
+browser builds the actual HTTP request your own click just triggered -
+and DevTools lets you inspect requests *your own browser* made. This is
+true of every website with a password field, not something specific to
+this project, and it is not a bug: DevTools can only ever show you
+*your own* browser's own traffic to and from the server it's currently
+talking to. It cannot show you anyone else's traffic. **This is
+deliberately not "fixed"** - not hidden, obfuscated, Base64-encoded, or
+hashed client-side - because none of those would add real security
+(see point 4 below) and all of them would make debugging harder for no
+benefit.
+
+The actual risk the instructor was pointing at is different: **could
+someone ELSE, on the same network, read that same password while it
+travels from your browser to the server?** Over plain HTTP, yes -
+that's exactly what a packet-capture tool like Wireshark is for. That
+is the problem HTTPS/TLS solves.
+
+### 4. Why client-side password hashing/encryption was NOT implemented
+
+It was considered and deliberately rejected, for the same reason
+security professionals generally reject it: hashing or "encrypting" the
+password in the browser before sending it (SHA256 in React, AES with a
+key embedded in the frontend bundle, Base64, a custom cipher) does not
+protect it from network interception - the transformed value becomes
+the new "password" an attacker just needs to capture and replay, and
+because the frontend's source is always downloadable by anyone, any key
+or algorithm baked into it is not a secret at all. **The correct,
+standard fix for network interception is HTTPS/TLS**, which encrypts
+the entire connection (not just the password field) using a proper key
+exchange the browser and server negotiate fresh for every connection -
+not a project-specific implementation detail. This project's actual
+architecture is:
+
+```
+Browser  --(HTTPS/TLS, when configured)-->  Backend  -->  bcrypt.compare()  -->  MongoDB passwordHash
+```
+
+### bcrypt storage architecture
+
+Every password-creation and password-change path in this project (public
+registration, Manager/Organization-manager creation, Manager password
+reset, self password change, and the System Admin bootstrap script) goes
+through the same `bcrypt.hash(password, SALT_ROUNDS)` call
+(`SALT_ROUNDS = 10`, exported once from `controllers/auth.controller.js`
+and reused everywhere else - never a second, parallel hashing
+implementation). MongoDB's `User` documents only ever contain
+`passwordHash` - there is no `password` field on the schema at all, so a
+plaintext password cannot be accidentally persisted even by a bug
+elsewhere in the codebase. Login (`bcrypt.compare`) and Change Password
+both compare against this same field.
+
+### JWT behavior
+
+A JWT is issued only at login, signed with `JWT_SECRET`
+(`jsonwebtoken`), and its payload contains exactly `{ userId, role,
+iat, exp }` - never a password, a password hash, or any other secret.
+`organizationId` and the account's active/must-change-password status
+are deliberately NOT put in the token at all: `middleware/auth.js`
+re-reads them from MongoDB on every request instead, so a token cannot
+go stale if a user's role, Organization, or active status changes after
+it was issued (see that middleware's own comment for the full
+reasoning). Expiry (`JWT_EXPIRES_IN`, default `1h`) is unchanged by this
+hardening pass.
+
+### Password response restrictions
+
+Every endpoint that returns a User - Login, Register, `GET /auth/me`,
+the Manager user-management list, Change Password, and Manager Password
+Reset - passes its result through the same `sanitizeUser()` function
+(`controllers/auth.controller.js`), which returns only
+`id/fullName/email/role/organizationId/isActive/mustChangePassword/
+createdAt`. `passwordHash` is structurally never included in any of
+these response shapes; there is one function that decides the safe
+response shape, not one per endpoint, so a future endpoint cannot
+accidentally leak it by forgetting to strip it manually.
+
+### Environment secret handling
+
+`backend/.env` (real `MONGODB_URI`, `JWT_SECRET`, and - only during
+first-time bootstrap - `SYSTEM_ADMIN_PASSWORD`) is gitignored and was
+never committed. `backend/.env.example` and `frontend/.env.example`
+contain placeholder values only. `SYSTEM_ADMIN_PASSWORD` is read exactly
+once, only by `scripts/seedSystemAdmin.js`, only when no System Admin
+account exists yet - normal server startup (`src/server.js`) never reads
+it, so it is safe to delete from `.env` immediately after the first
+bootstrap. See this repo's own git history/prior security-audit reports
+for the full original writeup of this behavior - unchanged by this
+pass, only re-verified.
+
+### Local development HTTP/HTTPS behavior
+
+By default, nothing changes: `npm start` (backend) serves plain
+`http://localhost:5000`, and `npm run dev` (frontend) serves plain
+`http://localhost:5173`, exactly as before this hardening pass. This is
+expected and safe for same-machine local development, where "the
+network" is just your own loopback interface.
+
+Optional local/LAN HTTPS is available for both sides, entirely opt-in:
+
+- **Backend**: set `HTTPS_ENABLED=true` plus `SSL_CERT_PATH`/
+  `SSL_KEY_PATH` (see `backend/.env.example`) pointing at a local
+  certificate/key pair (e.g. one generated with `mkcert` or `openssl`).
+  `src/server.js` then serves HTTPS directly via Node's own `https`
+  module instead of `http`. Missing or unreadable cert/key files cause a
+  clear, fast startup failure (checked BEFORE the MongoDB connection
+  attempt) rather than a silent fallback to plain HTTP.
+- **Frontend**: set `DEV_HTTPS_ENABLED=true` plus `DEV_SSL_CERT_PATH`/
+  `DEV_SSL_KEY_PATH` in `frontend/.env` (see `frontend/.env.example`).
+  `vite.config.js` reads these directly (never `VITE_`-prefixed, since
+  they configure the dev server itself, not the browser bundle) and
+  enables Vite's own HTTPS dev-server mode.
+
+### Production HTTPS expectations
+
+Two architectures are supported:
+
+```
+A) Reverse proxy / hosting platform terminates TLS (recommended):
+   Internet --HTTPS--> [nginx / Render / Railway / etc.] --HTTP--> Express
+
+B) Express terminates TLS directly (no proxy in front):
+   Internet --HTTPS--> Express (HTTPS_ENABLED=true)
+```
+
+Architecture (A) is preferred whenever the hosting platform already
+provides it - Express keeps speaking plain HTTP on its own internal
+network, which is simpler and lets the platform handle certificate
+renewal. In that case, leave `HTTPS_ENABLED` unset and instead set
+`TRUST_PROXY` (see `.env.example`) so `req.secure`/forwarded-proto
+detection works correctly, and set `FRONTEND_ORIGIN` to the real
+deployed frontend's `https://` origin (CORS). `FORCE_HTTPS=true` can
+then be enabled to redirect any plain HTTP request that still reaches
+the app to HTTPS - it is a no-op unless explicitly turned on, and
+exempts `/api/health` so uptime checks never get redirected into a
+failure. `HSTS_ENABLED=true` should only be turned on once HTTPS is
+confirmed working for every visitor (HSTS is sticky in the browser).
+
+Architecture (B) is for a deployment with no reverse proxy at all - set
+`HTTPS_ENABLED=true` plus the certificate variables directly.
+
+The frontend's `VITE_API_BASE_URL` must use `https://` in production -
+an `https://` frontend calling an `http://` API is a browser
+mixed-content error, and separately would send every request
+unencrypted regardless of what the backend supports.
+
+### Certificate/private-key handling
+
+No certificate or private key is ever hardcoded in source, committed,
+or logged - only a local file *path* is read from the environment, at
+startup, into memory. `.gitignore` (both root and `backend/`) ignores
+`*.pem`, `*.key`, `*.p12`, `*.pfx`, a conventional `certs/` directory,
+and `*.crt`, so a locally-generated or `mkcert`-issued certificate can
+live on disk without ever being accidentally committed. Production
+certificates should come from your hosting platform or a real
+certificate authority (Let's Encrypt, etc.) - this project never
+generates or ships one.
+
+### CORS
+
+`FRONTEND_ORIGIN` (comma-separated) controls which browser origins may
+call this API; it defaults to this project's own local Vite dev origins
+so local development needs no configuration. `cors()` with no options
+(the previous configuration) reflected every origin - now only exact,
+explicitly-listed origins are allowed, and a disallowed origin gets a
+clean 403. Requests with no `Origin` header (server-to-server calls,
+health checks, curl) are unaffected, since CORS is a browser-enforced
+mechanism with nothing to check in that case.
+
+### Security headers
+
+`helmet()` is now applied to every response, providing its standard
+safe defaults (`X-Content-Type-Options: nosniff`, a frame-protection
+header, `Referrer-Policy`, etc.). Two things are deliberately NOT
+enabled automatically: Content-Security-Policy (this backend serves
+JSON plus one binary image route, never HTML, so a CSP tuned for an
+HTML server adds complexity with no protective benefit here), and HSTS
+(sticky in the browser - only turn on `HSTS_ENABLED=true` once HTTPS is
+confirmed to work for every visitor, including local development, which
+must NEVER have HSTS enabled).
+
+### What remains to be configured manually for a real deployment
+
+- A real TLS certificate (platform-provided or from a real CA) - this
+  project never generates or ships one.
+- `FRONTEND_ORIGIN` set to the real deployed frontend's `https://`
+  origin.
+- `TRUST_PROXY` set correctly for the real reverse proxy/platform in
+  front of the app, if any.
+- `VITE_API_BASE_URL` set to the real deployed backend's `https://`
+  origin at frontend build time.
+- A decision on `FORCE_HTTPS`/`HSTS_ENABLED`, made only after confirming
+  HTTPS actually works end to end in that real environment.
+
+### Known limitations
+
+- This sandboxed development environment has no outbound network access
+  to the project's real MongoDB Atlas instance (confirmed during the
+  GridFS migration work), so the HTTPS tests below prove a genuine TLS
+  handshake against this backend, but do not prove behavior against a
+  real production MongoDB connection string over TLS (MongoDB's own
+  driver-level TLS to Atlas was already in use before this pass and is
+  unaffected by it - it is a separate connection from the browser-to-
+  backend one this pass focuses on).
+- No automated certificate renewal (e.g. Let's Encrypt's ACME protocol)
+  is implemented - a real deployment should use its platform's own
+  renewal mechanism.
+
+## S3 Image Storage Migration
+
+Request image attachments (DOC-45 Before Images, DOC-56 Completion
+Images) can now additionally be stored in **S3-compatible object
+storage** - AWS S3, or a compatible provider (MinIO, Cloudflare R2,
+Backblaze B2, etc.) via an optional custom endpoint. This was, like the
+GridFS migration before it, compatibility-first: nothing was removed.
+Local-disk attachments (pre-GridFS-migration) and GridFS attachments
+(pre-this-migration, or created while `IMAGE_STORAGE_PROVIDER=gridfs`)
+both continue working forever, with no required backfill, no server
+restart, and no existing image ever deleted.
+
+- **Architecture before**: MongoDB stored attachment metadata plus one
+  of two storage references (`storedName` for local disk, `fileId` for
+  GridFS); the actual image bytes lived either on the backend's own
+  filesystem or inside MongoDB's `requestImages` GridFS bucket.
+- **Architecture after**: a third storage reference, `objectKey`, is
+  now also possible - the actual image bytes live in an S3-compatible
+  bucket, and MongoDB stores only safe metadata: `originalName`,
+  `mimeType`, `size`, `uploadedAt` (+`uploadedBy` for Completion
+  Images), and `objectKey` (the S3 key) - never the AWS secret key,
+  never a permanent/presigned URL, never raw image bytes or base64.
+- **Why S3 over GridFS for production**: GridFS is a real, working
+  MongoDB feature and remains fully supported here, but a dedicated
+  object-storage service is the more conventional production
+  architecture for user-uploaded binary content - it decouples image
+  storage from the application database entirely (no chunk-collection
+  read/write load on MongoDB itself), scales and is priced
+  independently, and every major cloud/self-hosted platform speaks the
+  same S3 API, so this project is not locked into any one provider.
+- **Storage abstraction (new)**: `src/services/requestImageStorage.js`
+  is now the ONE place that decides which backend (S3, GridFS, or
+  legacy local disk) handles a given operation. Controllers never touch
+  the AWS SDK, `mongoose.mongo.GridFSBucket`, or `fs` directly for image
+  storage anymore - they call three generic operations:
+  `uploadImage(buffer, context)`, `getImageStream(attachment)`, and
+  `deleteImage(attachment)`. Which backend an EXISTING attachment uses
+  is never stored as a separate field - it is derived from which
+  reference is populated (`objectKey` -> S3, `fileId` -> GridFS,
+  `storedName` -> legacy local disk), the same "derive, don't
+  duplicate" principle the GridFS migration already established for
+  `fileId` vs. `storedName`.
+- **Which backend NEW uploads use**: controlled by the optional
+  `IMAGE_STORAGE_PROVIDER` environment variable (`"s3"` or `"gridfs"`).
+  **Defaults to `"gridfs"` when unset** - deliberately NOT `"s3"` by
+  default, so a deployment that has not yet configured S3 credentials
+  keeps working with zero new configuration. Set
+  `IMAGE_STORAGE_PROVIDER=s3` (plus the S3 env vars below) to switch new
+  uploads to S3; existing GridFS/local attachments are completely
+  unaffected either way, since reads and deletes always follow each
+  attachment's own stored reference, never this setting.
+- **S3 client / provider configuration**: uses the official
+  `@aws-sdk/client-s3` (AWS SDK v3). Required env vars (only when
+  `IMAGE_STORAGE_PROVIDER=s3`): `S3_BUCKET`, `S3_REGION`,
+  `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`. Optional: `S3_ENDPOINT`,
+  for any S3-compatible provider other than real AWS S3 (MinIO,
+  Cloudflare R2, Backblaze B2, ...) - when set, the client also enables
+  `forcePathStyle`, which virtual-hosted-style AWS bucket URLs generally
+  need to work correctly against non-AWS endpoints. No provider URL or
+  credential is ever hardcoded in source; `backend/.env.example` lists
+  every variable as a placeholder only (see there for the full list),
+  and the real `backend/.env` is never modified automatically and stays
+  git-ignored exactly like every other secret in this project. The S3
+  client itself is constructed lazily (only the first time a real S3
+  operation is attempted, mirroring `gridFsStorage.js`'s own lazy bucket
+  pattern) and cached - a deployment that never actually uses S3 never
+  even needs the env vars set, and no error occurs at startup either
+  way.
+- **Object key design**: never derived from anything client-supplied
+  (not the original filename, not a client-chosen path). Server-
+  generated: `organizations/{organizationId}/requests/{requestId}/
+  before/{uuid}.ext` or `.../completion/{uuid}.ext`, where
+  `organizationId`/`requestId` are always the trusted server-side
+  context (never `req.body`), `uuid` is `crypto.randomUUID()`, and the
+  extension is derived only from the already-validated MIME type
+  (`.jpg`/`.png`/`.webp`) - a file uploaded with a hostile original
+  filename (e.g. `../../etc/passwd.jpg`) can never influence the actual
+  storage key.
+- **Request attachment schema** (`models/Request.js`) - both
+  `attachmentSchema` and `completionAttachmentSchema` gained a new
+  optional field, `objectKey` (String). The existing `ensureStorageReference`
+  `pre('validate')` hook was extended to accept any ONE of `fileId`
+  (GridFS), `storedName` (legacy local disk), or `objectKey` (S3) - a
+  pure-S3 attachment legitimately has neither of the other two. No
+  database migration is required before server startup; every existing
+  document keeps validating and loading exactly as before.
+- **New upload flow (Before and Completion Images alike)**: Frontend ->
+  authenticated API -> Multer `memoryStorage` (unchanged, reused as-is
+  from the GridFS migration - no new Multer instance was needed) ->
+  MIME/size/count validation (unchanged: JPEG/PNG/WEBP only, 5 MB per
+  image, 5 images per Request per collection) -> `requestImageStorage
+  .uploadImage()` (routes to S3 or GridFS per `IMAGE_STORAGE_PROVIDER`)
+  -> attachment metadata (with `objectKey` or `fileId`, whichever was
+  used) pushed onto the Request document and saved. No new upload ever
+  writes to local disk first, and while `IMAGE_STORAGE_PROVIDER=s3`, no
+  new GridFS file is ever created for a successful upload.
+- **Image authorization / delivery flow (unchanged contract, new
+  backend support)**: `GET /api/requests/:requestId/attachments/:attachmentId/content`
+  is completely unchanged from the outside - same authentication chain,
+  same Employee/Operator/Manager authorization rules
+  (`canViewRequestImages`), same anti-enumeration 404s, same 403 for
+  System Admin. Internally it now calls
+  `requestImageStorage.getImageStream(attachment)`, which transparently
+  streams from S3, GridFS, or local disk depending on that specific
+  attachment's own reference - the frontend, and this endpoint's own
+  request/response shape, never need to know or care which backend
+  actually served a given image (`AuthenticatedRequestImage.jsx`,
+  `RequestRow.jsx`, `ManagerRequestRow.jsx` needed ZERO changes for this
+  migration). The bucket itself is never made public and no permanent or
+  presigned S3 URL is ever returned in any API response - every image
+  byte is proxied through this one authenticated backend endpoint,
+  exactly like GridFS/local images already were. A presigned-URL
+  approach was deliberately NOT adopted (task decision, documented here
+  per that decision's own requirement): the existing backend-proxied
+  streaming architecture already satisfies every authorization
+  requirement with zero frontend changes, whereas presigned URLs would
+  add complexity (short-lived generation, careful never-persisted
+  handling) for no clear benefit at this project's scale.
+- **S3 security**: the bucket is expected to be fully private (no
+  public-read ACLs) - this project only ever uses authenticated
+  `PutObject`/`GetObject`/`DeleteObject` calls via the AWS SDK with the
+  configured credentials, never a public URL. `S3_ACCESS_KEY_ID`/
+  `S3_SECRET_ACCESS_KEY` are never sent to the frontend, never logged,
+  and never included in an error response - only clear "which env var is
+  missing" messages are ever thrown, never the values themselves.
+  Recommended least-privilege IAM policy for the credentials used here:
+  `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject`, scoped to the
+  one configured bucket (and ideally further scoped to the
+  `organizations/*` key prefix this project always writes under) -
+  actual cloud IAM configuration is a manual, external step, not
+  something this codebase can or does perform.
+- **Content-Type / download security**: MIME type is validated before
+  any upload (unchanged three-type allowlist), the S3 object's stored
+  `ContentType` is set from that same validated value, and the download
+  response's `Content-Type` is likewise always set from trusted,
+  already-validated attachment metadata - never re-derived from a
+  client-supplied filename or header. The content-delivery endpoint now
+  also sets `Content-Disposition: inline` (renders in-browser rather
+  than forcing a download), built from a static string, never from
+  `originalName`.
+- **GridFS preservation**: `services/gridFsStorage.js`,
+  `requestImages.files`/`requestImages.chunks`, and every existing
+  `fileId` field are completely untouched by this migration. GridFS is
+  now simply one of three supported storage providers - fully supported
+  for both existing images (forever) and new uploads (while
+  `IMAGE_STORAGE_PROVIDER=gridfs`, the default).
+- **Legacy local-disk preservation**: `middleware/upload.js`'s legacy
+  disk-storage `upload` instance, `backend/uploads/requests/`, and every
+  existing `storedName` field are likewise completely untouched - reads
+  and deletes for a `storedName`-only attachment work exactly as they
+  did before either migration.
+- **Migration script (optional, non-destructive, GridFS -> S3 only)**:
+  `backend/scripts/migrateRequestImagesToS3.js`
+  (`npm run migrate:request-images-to-s3`) copies every remaining
+  GridFS-backed attachment's bytes into S3 and sets its `objectKey`,
+  while leaving `fileId`/every other field completely untouched and
+  NEVER deleting the original GridFS file (rollback safety, matching the
+  GridFS migration script's own "never delete the original on first
+  pass" decision). It deliberately does NOT touch legacy local-disk
+  (`storedName`-only) attachments at all - that remains a separate,
+  future, deliberate decision. Fails fast with a clear message if S3 is
+  not configured, before touching MongoDB at all. Idempotent (an
+  attachment that already has an `objectKey` can never be matched again
+  on a later run - reported as "skipped", not "migrated"); a missing
+  GridFS file or a failed upload is reported and skipped, never crashes
+  the rest of the run; a `Request.save()` failure after a successful S3
+  upload rolls back just that document's newly-uploaded S3 objects
+  (never the original GridFS files, never a different document's
+  attachments). This script is never run automatically - `src/server.js`
+  never requires it.
+- **Failure/rollback handling**: mirrors the GridFS migration's own
+  rollback design, generalized across all three backends via
+  `requestImageStorage.deleteImage()`. If a multi-file upload's storage
+  write succeeds for file 1 but fails for file 2 (S3 or GridFS,
+  whichever `IMAGE_STORAGE_PROVIDER` is active), only file 1's just-
+  uploaded object is deleted - never anything from a previous, already-
+  saved upload. If every file uploads successfully but the following
+  `Request.create()`/`requestDoc.save()` fails, every object just
+  uploaded for that one attempt is deleted before the error response is
+  sent - no orphaned S3 objects (or GridFS files) are ever left behind
+  by a failed request. Deleting an attachment always uses the
+  `objectKey`/`fileId`/`storedName` already stored on the AUTHORIZED
+  Request's own attachment subdocument - never a client-supplied
+  identifier.
+- **Organization isolation (unchanged)**: every existing access rule
+  (Employee: only their own Request; Operator: only an assigned
+  Request; Manager: any Request in their own Organization; System
+  Admin: no operational Request image access at all) applies identically
+  regardless of which storage backend a given image actually uses. A
+  user can never retrieve an S3 object simply by guessing an
+  `objectKey` - the content-delivery endpoint only ever resolves an
+  `objectKey` from an attachment it already independently authorized on
+  a specific, already-authorized Request; there is no route that accepts
+  an `objectKey`/`fileId` directly from a client.
+- **File limits (unchanged)**: JPEG/PNG/WEBP only, 5 MB per image, 5
+  images per Request per collection (Before and Completion Images have
+  independent 5-image caps).
+- **Real S3 limitation**: this sandboxed development environment has no
+  outbound network access (the same limitation disclosed during the
+  GridFS migration work) and no real S3-compatible credentials were
+  ever configured in this environment's `backend/.env`, so live
+  persistence against a real S3-compatible bucket was **not** exercised
+  - `@aws-sdk/client-s3` installs and loads correctly, but this is a
+  **STRUCTURAL/MOCK TEST ONLY** disclosure, not a claim that real cloud
+  storage was tested. `services/requestImageStorage.js` was instead
+  tested against a fake, in-memory S3 client substituted for
+  `@aws-sdk/client-s3`'s `S3Client`/`PutObjectCommand`/`GetObjectCommand`/
+  `DeleteObjectCommand` (the exact same substitution point a real AWS
+  SDK client would occupy), combined with the same fake-GridFSBucket
+  substitution the GridFS migration already established. This proves the
+  abstraction's own logic (routing by `IMAGE_STORAGE_PROVIDER`, object
+  key generation, streaming, rollback, cross-provider coexistence) is
+  correct, but does not by itself prove behavior against a real AWS S3
+  (or MinIO/R2/B2) bucket over the network.
+- **Test summary**: a temporary E2E suite (`backend/s3-migration-test.tmp.js`,
+  deleted after this run) extended the project's established mocked-model
+  HTTP harness (`Module._load` interception, real unmodified `src/app.js`
+  served via `http.createServer` + native `fetch`) with the fake-S3-client
+  and fake-GridFSBucket substitutions described above, covering: Storage
+  (JPEG/PNG/WEBP upload succeeds, invalid MIME/oversized rejected, safe
+  server-generated `objectKey`, a hostile original filename never
+  influences the key, response never exposes `objectKey`/`fileId`/
+  internal storage fields - 9 checks); Before Images (Employee views own,
+  Manager views, assigned Operator views, a different same-org Employee
+  rejected 403, another Organization rejected 404, removal deletes the
+  S3 object - 7 checks); Completion Images (assigned Operator upload
+  works, wrong Operator/Employee/Manager all rejected 403, upload outside
+  `in_progress` rejected 409, removal deletes the S3 object - 6 checks);
+  Failure/Rollback (a simulated `requestDoc.save()` failure after a
+  successful S3 upload rolls back only the new object and leaves the
+  pre-existing attachment/object untouched, a simulated mid-batch S3
+  failure leaves zero net-new orphaned objects, an unknown attachment id
+  cannot be deleted, a since-deleted S3 object is handled as a clean 404
+  rather than a 500 - 6 checks); Cross-Provider Compatibility (a single
+  Request with a legacy local-disk attachment, a GridFS attachment, AND
+  an S3 attachment all coexisting and all rendering correctly through the
+  identical `url` contract - 3 checks); and a Regression sweep (Request
+  creation with zero images still works, the SLA field is still present,
+  `IMAGE_STORAGE_PROVIDER=gridfs` still correctly uploads to GridFS
+  instead of S3, the unrelated health endpoint is unaffected - 4 checks).
+  **All 42 assertions passed, 0 failed.**
+- **Frontend build verification**: `npx vite build` completed with no
+  errors - this migration made zero frontend source changes (Phase 11's
+  own "prefer minimal frontend change" decision: the existing
+  `AuthenticatedRequestImage.jsx` fetch-as-blob pattern already works
+  identically regardless of backend).
+- **Known limitations / technical debt**: (1) no real S3-compatible
+  credentials were available in this environment - see "Real S3
+  limitation" above; a real deployment should perform a small, isolated
+  smoke test (upload/read/delete one temporary test object, never a real
+  Request image) after configuring real credentials, before relying on
+  this in production. (2) the optional migration script only covers
+  GridFS -> S3, not legacy-local -> S3 - a future, separate task may add
+  that path once needed. (3) There is currently no scheduled/automatic
+  run of the migration script - it is a manual, explicit command, exactly
+  like the GridFS migration script before it.

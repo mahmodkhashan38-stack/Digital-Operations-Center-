@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import RequestStatusBadge from './RequestStatusBadge.jsx';
 import RequestSlaBadge from './RequestSlaBadge.jsx';
-import { API_BASE_URL } from '../services/api.js';
+import AuthenticatedRequestImage from './AuthenticatedRequestImage.jsx';
 
 // DOC-52 - one row in the Manager Dashboard's new "Organization Requests"
 // table. Deliberately a SEPARATE small component from RequestRow.jsx
@@ -344,18 +344,7 @@ function ManagerRequestRow({
                   <ul className="attachment-gallery">
                     {request.attachments.map((attachment) => (
                       <li key={attachment.id} className="attachment-item">
-                        <a href={`${API_BASE_URL}${attachment.url}`} target="_blank" rel="noreferrer">
-                          <img
-                            src={`${API_BASE_URL}${attachment.url}`}
-                            alt={attachment.originalName}
-                            className="attachment-thumb"
-                            loading="lazy"
-                            onError={(event) => {
-                              event.target.onerror = null;
-                              event.target.classList.add('attachment-thumb-broken');
-                            }}
-                          />
-                        </a>
+                        <AuthenticatedRequestImage url={attachment.url} alt={attachment.originalName} />
                         <span className="attachment-caption">{attachment.originalName}</span>
                       </li>
                     ))}
@@ -372,18 +361,7 @@ function ManagerRequestRow({
                   <ul className="attachment-gallery">
                     {request.completionAttachments.map((attachment) => (
                       <li key={attachment.id} className="attachment-item">
-                        <a href={`${API_BASE_URL}${attachment.url}`} target="_blank" rel="noreferrer">
-                          <img
-                            src={`${API_BASE_URL}${attachment.url}`}
-                            alt={attachment.originalName}
-                            className="attachment-thumb"
-                            loading="lazy"
-                            onError={(event) => {
-                              event.target.onerror = null;
-                              event.target.classList.add('attachment-thumb-broken');
-                            }}
-                          />
-                        </a>
+                        <AuthenticatedRequestImage url={attachment.url} alt={attachment.originalName} />
                         <span className="attachment-caption">{attachment.originalName}</span>
                       </li>
                     ))}
