@@ -196,6 +196,181 @@ a {
   cursor: pointer;
 }
 
+/* DOC-18 - "In-App Notifications". Bell + dropdown panel, mounted inside
+   Navbar's own link row (components/NotificationBell.jsx). Deliberately a
+   plain button + absolutely-positioned panel, no modal/overlay library -
+   the smallest addition that fits this project's existing Navbar. */
+.notification-bell {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.notification-bell-button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--transition), background-color var(--transition);
+}
+
+.notification-bell-button svg {
+  width: 1.35rem;
+  height: 1.35rem;
+}
+
+.notification-bell-button:hover {
+  color: var(--text-primary);
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.notification-badge {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.15rem;
+  min-width: 1.1rem;
+  height: 1.1rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background-color: var(--color-primary, #e11d48);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.1rem;
+  text-align: center;
+}
+
+.notification-panel {
+  position: absolute;
+  top: calc(100% + 0.6rem);
+  right: 0;
+  width: 340px;
+  max-width: 90vw;
+  max-height: 420px;
+  display: flex;
+  flex-direction: column;
+  background-color: rgba(24, 24, 27, 0.98);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-md, 10px);
+  box-shadow: var(--shadow-md, 0 12px 32px rgba(0, 0, 0, 0.4));
+  overflow: hidden;
+  z-index: 20;
+}
+
+.notification-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+}
+
+.notification-panel-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.notification-mark-all-btn {
+  background: none;
+  border: none;
+  color: var(--color-primary, #e11d48);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.2rem 0.3rem;
+}
+
+.notification-mark-all-btn:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.notification-list-wrapper {
+  overflow-y: auto;
+}
+
+.notification-panel-message {
+  padding: 1.25rem 1rem;
+  text-align: center;
+}
+
+.notification-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.notification-item {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+}
+
+.notification-item:last-child {
+  border-bottom: none;
+}
+
+.notification-item-unread {
+  background-color: rgba(225, 29, 72, 0.06);
+}
+
+.notification-item-button {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  padding: 0.75rem 1rem;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.notification-item-button:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.notification-item-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.notification-item-message {
+  font-size: 0.82rem;
+  color: var(--text-secondary, var(--text-primary));
+}
+
+.notification-item-time {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.notification-item-mark-read {
+  flex-shrink: 0;
+  width: 2.2rem;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.notification-item-mark-read:hover {
+  color: var(--color-primary, #e11d48);
+}
+
 /* ---------- Page container ---------- */
 .page-container {
   flex: 1;
@@ -357,7 +532,8 @@ a {
   transition: color var(--transition);
 }
 
-.form-group input {
+.form-group input,
+.form-group textarea {
   width: 100%;
   padding: 0.85rem 1rem;
   font-size: 0.95rem;
@@ -365,22 +541,41 @@ a {
   border-radius: var(--radius-sm);
   background-color: var(--bg-input);
   color: var(--text-primary);
+  font-family: inherit;
   transition: border-color var(--transition), box-shadow var(--transition), background-color var(--transition);
+}
+
+.form-group textarea {
+  resize: vertical;
 }
 
 .input-group input {
   padding-left: 2.75rem;
 }
 
-.form-group input::placeholder {
+.form-group input::placeholder,
+.form-group textarea::placeholder {
   color: var(--text-muted);
 }
 
-.form-group input:focus {
+.form-group input:focus,
+.form-group textarea:focus {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: var(--shadow-glow);
   background-color: #18181b;
+}
+
+/* DOC-61 - Organization Settings form (Manager Dashboard). Reuses the
+   existing .form-group/.org-info-details styling; only adds spacing so the
+   read-only Company Code/Status/Created block sits clearly apart from the
+   editable fields above it and the Save button below it. */
+.org-settings-form .org-info-details {
+  margin: 0.5rem 0 1.25rem;
+}
+
+.org-settings-form .btn {
+  margin-top: 0.25rem;
 }
 
 .input-group input:focus ~ .input-icon,
@@ -393,6 +588,26 @@ a {
   flex-direction: column;
   gap: 0.85rem;
   margin-top: 1.75rem;
+}
+
+/* DOC-62 - "User Profile". Small helper text under a read-only field
+   (e.g. Email) explaining why it cannot be edited here - not an error, so
+   it deliberately does not reuse .form-error's red styling. */
+.field-hint {
+  margin: 0.4rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+/* DOC-62 - Profile page's Save Changes / Change Password pair sits side by
+   side rather than stacked full-width like a typical single-button
+   .form-actions block, since Change Password is a secondary navigation
+   action, not a second submit. Wraps on narrow screens instead of
+   overflowing. */
+.profile-actions {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 /* ---------- Auth pages (Login / Register) ---------- */
@@ -956,6 +1171,28 @@ a {
   color: #cbd5e1;
 }
 
+/* DOC-16 - "Request Number / Human-Friendly ID". RequestNumberBadge.jsx's
+   badge - deliberately NOT reusing the `.status-badge` base class (that
+   base communicates workflow/health state via color - open/resolved/
+   overdue/etc.) - a requestNumber is a stable IDENTIFIER, not a status, so
+   it gets its own small, neutral, monospaced tag instead of borrowing a
+   status color that would misleadingly suggest this badge means something
+   about the Request's current state. */
+.request-number-badge {
+  display: inline-block;
+  margin-right: 0.5rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  background-color: rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: var(--text-secondary);
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 .sla-badge-wrapper {
   display: flex;
   flex-direction: column;
@@ -1361,6 +1598,23 @@ a {
   background: rgba(225, 29, 72, 0.06);
 }
 
+/* DOC-15 - "Advanced Request History & Reassignment". Current/New
+   Operator side-by-side inside the reassignment confirmation panel
+   (.cancel-confirm-panel above) - reuses the same auto-fit grid shape
+   .org-card-details already established, at the smaller two-column scale
+   this specific summary needs. */
+.reassign-operator-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.9rem;
+}
+
+.reassign-operator-summary p {
+  margin: 0.15rem 0 0;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
 /* DOC-13: the comment thread inside RequestRow's expanded detail panel. */
 .request-comments {
   display: flex;
@@ -1415,6 +1669,95 @@ a {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+/* DOC-17: the Request activity timeline - RequestRow.jsx's expanded
+   detail panel (after Comments) and ManagerRequestRow.jsx's own
+   "View Timeline" toggle row. Mirrors .request-comments's
+   border-top/flex-column pattern for visual consistency; .timeline-item
+   reuses .comment-item's card look so the two lists read as one visual
+   family. */
+.request-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+}
+
+.timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.timeline-item {
+  padding: 0.65rem 0.9rem;
+  border-radius: 8px;
+  background: var(--surface-muted, rgba(255, 255, 255, 0.04));
+  border-left: 3px solid var(--accent-color, rgba(99, 102, 241, 0.6));
+}
+
+.timeline-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.timeline-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.timeline-timestamp {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.timeline-detail {
+  margin: 0.3rem 0 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary, var(--text-primary));
+}
+
+.timeline-actor {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* DOC-64 - "Audit Log". Reuses .timeline-list/.timeline-item and friends
+   above (the same visual family as the DOC-17 Request Timeline) rather
+   than inventing a second list style - only the small additions below are
+   new. */
+.audit-log-filters {
+  margin-bottom: 1rem;
+}
+
+.audit-log-clear-btn {
+  margin-bottom: 1.25rem;
+}
+
+.audit-log-change-label {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.audit-log-org-line {
+  font-style: italic;
+}
+
+.audit-log-load-more-btn {
+  margin-top: 1rem;
+  width: 100%;
 }
 
 /* DOC-45: the image attachments section inside RequestRow's expanded

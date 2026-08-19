@@ -661,3 +661,567 @@ section - this is the short, frontend-specific summary.
   configure the Vite dev server itself (read in `vite.config.js`'s own
   Node context), never the browser bundle. Off by default; `npm run dev`
   is unaffected unless you opt in.
+
+## Request Activity Timeline (DOC-17)
+
+Full backend writeup lives in `backend/README.md`'s own "Request
+Activity Timeline" section - this is the short, frontend-specific
+summary.
+
+- **`components/RequestActivityTimeline.jsx`** - a small, self-contained
+  component (mirrors `AuthenticatedRequestImage.jsx`'s own "reads
+  `token` from `useAuth()` and calls the backend itself" shape): it only
+  needs a `requestId` prop, and fetches
+  `requestApi.getActivities(requestId, token)` itself the moment it
+  mounts - which only happens once the row it lives in is actually
+  expanded, never for a collapsed row. No new props or state were added
+  to `Dashboard.jsx`/`OperatorDashboard.jsx`/`ManagerDashboard.jsx` for
+  this feature at all.
+- **Human-readable text is built entirely on the frontend**
+  (`describeActivity`, inside the component) - the backend only ever
+  sends structured `type`/`oldValue`/`newValue`/`metadata`, never a
+  finished English sentence, so a future wording change or localization
+  never requires a backend/database change.
+- **Wired into `RequestRow.jsx`** (Employee/Operator dashboards) as a new
+  block placed after the existing Comments block, inside the same
+  expanded detail panel - no redesign of the row itself.
+- **Wired into `ManagerRequestRow.jsx`** as its own "View Timeline"
+  toggle button + its own `<tr>`, matching that row's existing "View
+  Images" toggle shape exactly (that row has no single shared detail
+  panel the way `RequestRow.jsx` does, so each independent read-only
+  toggle gets its own boolean/row).
+- **`index.css`** - new classes: `.request-timeline` (mirrors
+  `.request-comments`'s border-top/flex-column pattern),
+  `.timeline-list`/`.timeline-item`/`.timeline-item-header`/
+  `.timeline-title`/`.timeline-timestamp`/`.timeline-detail`/
+  `.timeline-actor` (`.timeline-item` reuses `.comment-item`'s card look
+  so the two lists read as one visual family).
+- **Empty state**: a Request with no activity yet (any Request created
+  before this feature shipped, and never backfilled) shows "No activity
+  recorded yet." - never a blank gap or a loading spinner stuck forever.
+
+## In-App Notifications (DOC-18)
+
+Full backend writeup (recipient rules, types implemented/deferred,
+Timeline-vs-Notification distinction) lives in `backend/README.md`'s own
+"In-App Notifications" section - this is the short, frontend-specific
+summary.
+
+- **`components/NotificationBell.jsx`** - a self-contained bell + dropdown
+  panel, mounted once inside `Navbar.jsx` (itself mounted once at the top
+  of `App.jsx`, outside every route - so the bell is present on every page
+  while authenticated). Reads `token`/`user` from `useAuth()` and calls the
+  backend itself, the same "own its own data" shape
+  `RequestActivityTimeline.jsx` (DOC-17) already established - Navbar
+  needed no new state/props for this feature.
+- **Visibility**: hidden entirely for an unauthenticated guest (only ever
+  rendered inside Navbar's `isAuthenticated` branch) AND for System Admin
+  (no Request notification use case exists for that role - same choice
+  already made for the Organization Chat link) AND during the forced-
+  password-change state (the notification API itself requires
+  `requirePasswordChangeCompleted`, so a bell that could never load
+  anything would only be confusing).
+- **Polling** (task spec section 31): reuses `OrganizationChat.jsx`'s own
+  established shape - one `setInterval` + an in-flight guard ref, cleared
+  on unmount - rather than a second polling convention. Every 20 seconds
+  (within the requested 15-30s range), the unread count is always
+  refreshed; the notification list is ALSO refreshed on the same tick, but
+  only while the panel is currently open - never a second interval. The
+  full list is otherwise only fetched on demand, when the panel opens
+  (task spec: "notification list: fetch when panel opens"). Because this
+  component only ever mounts while authenticated, logging out unmounts it
+  entirely, which stops the interval automatically via its own cleanup
+  function - no separate "stop polling on logout" code path was needed.
+- **Panel**: shows title/message/relative time/unread indicator per
+  notification, a "Mark All as Read" header action, and a per-item mark-
+  read control; closes when clicking outside it (a `mousedown` listener
+  scoped to while the panel is open only).
+- **Click behavior** (task spec section 30): marks the notification read,
+  then navigates. This application has no standalone Request URL and no
+  query-param deep-link mechanism for "open this one row" (every Request
+  is viewed inline inside a role's own dashboard table - see
+  `RequestRow.jsx`/`ManagerRequestRow.jsx`) - inventing either would mean
+  rewriting routing, which task spec explicitly says not to do. The
+  existing, safest mechanism is reused instead: the caller is sent to
+  THEIR OWN role's dashboard (`utils/roleRoutes.js`'s `destinationForRole`
+  - the exact function `Navbar.jsx`/`ProtectedRoute.jsx` already use for
+  this), landing an Employee in Employee-visible Request context, an
+  Operator in Operator-visible context, a Manager in Manager-visible
+  context - the Request's own title (already shown in the notification)
+  is enough to find it via that dashboard's existing search/filter
+  controls (DOC-54).
+- **`services/api.js`** - new `notificationApi` object:
+  `list(token, {before, limit})`, `getUnreadCount(token)`,
+  `markRead(id, token)`, `markAllRead(token)` - reuses the exact same
+  query-string builder and `request()` helper every other API object in
+  this file already uses.
+- **`index.css`** - new classes: `.notification-bell`/
+  `.notification-bell-button`/`.notification-badge` (the bell + unread
+  count), `.notification-panel`/`.notification-panel-header`/
+  `.notification-mark-all-btn` (the dropdown shell), `.notification-list`/
+  `.notification-item`/`.notification-item-unread`/
+  `.notification-item-button`/`.notification-item-title`/
+  `.notification-item-message`/`.notification-item-time`/
+  `.notification-item-mark-read` (each row) - a plain absolutely-
+  positioned panel, no modal/overlay library.
+
+## Request Number / Human-Friendly ID (DOC-16)
+
+Full backend writeup (counter architecture, concurrency, migration,
+security) lives in `backend/README.md`'s own "Request Number /
+Human-Friendly ID" section - this is the short, frontend-specific summary.
+
+- **`components/RequestNumberBadge.jsx`** - a small, new sibling to
+  `RequestStatusBadge.jsx`/`RequestSlaBadge.jsx`. Renders nothing at all
+  (`null`) when `requestNumber` is absent/`null` (a historical, not-yet-
+  migrated Request) - the title alone is shown in that case, exactly as
+  before this ticket, never a raw ObjectId.
+- **Where it's shown**: inline, immediately before the title, inside the
+  existing title `<td>` in `RequestRow.jsx` (Employee + Operator
+  dashboards, both reuse this one component) and `ManagerRequestRow.jsx`
+  (Manager dashboard) - not as a new dedicated table column, which would
+  also require updating each table's `<thead>` and the expanded detail
+  row's `colSpan`. Also shown in the DOC-58 duplicate-request confirm
+  dialog on `Dashboard.jsx`, next to each candidate's title.
+- **`index.css`** - one new class, `.request-number-badge`: deliberately
+  NOT built on the shared `.status-badge` base every workflow/SLA badge in
+  this project uses (that base communicates state via color) - a
+  `requestNumber` is a stable identifier, not a status, so it gets its own
+  small, neutral, monospaced tag instead of borrowing a status color that
+  would misleadingly suggest it means something about the Request's
+  current state.
+- **Notifications**: no frontend change was needed - `NotificationBell.jsx`
+  already renders `notification.title`/`notification.message` verbatim;
+  the backend now bakes `Request REQ-000123` directly into that message
+  text (see `backend/README.md`), so the frontend picks it up for free.
+- **Timeline**: no frontend change was needed either -
+  `RequestActivityTimeline.jsx` never displayed Request identity in the
+  first place (it only describes individual events like "Assigned to X"
+  inside an already-expanded row that shows the title/requestNumber at the
+  row level) - it still receives `requestId={request.id}` (the internal
+  id, never `requestNumber`) as its one prop, unchanged.
+- **Build verification**: `npx vite build` completed with no errors after
+  this ticket's changes (69 modules transformed).
+
+## Advanced Request History & Reassignment (DOC-15)
+
+Full backend writeup (endpoint extension strategy, reason validation,
+metadata shape, notification/SLA/status preservation, authorization) lives
+in `backend/README.md`'s own "Advanced Request History & Reassignment"
+section - this is the frontend-specific summary.
+
+- **`ManagerRequestRow.jsx` - reassignment confirmation panel (new)**:
+  reuses the row's existing mutually-exclusive `mode` state pattern
+  (already used for DOC-59's Edit/Cancel/Remove-Operator panels), adding a
+  new `'reassign'` mode. Changing the operator `<select>` on an
+  already-assigned Request no longer submits immediately - it opens a
+  confirmation panel (Current Operator, New Operator, a required Reason
+  textarea, Cancel/Reassign Request buttons), matching the task spec's own
+  example format exactly. A genuine FIRST assignment (no current operator)
+  still submits immediately, exactly as before this ticket - no reason
+  modal, no added friction.
+- **`ManagerRequestRow.jsx` - unassign confirmation panel (extended)**:
+  the pre-existing "Remove Operator" confirmation panel now also includes a
+  required Reason textarea; client-side validation blocks submission on an
+  empty/whitespace-only reason before the request is ever sent, matching
+  the backend's own bounds.
+- **`ManagerRequestRow.jsx` - Edit panel parity**: the combined Edit panel
+  (DOC-59, priority/category/operator in one form) now also shows the
+  Reason textarea, but ONLY when the operator field is both non-empty
+  originally (a genuine current assignment exists) AND has actually been
+  changed to a different operator - never for a first assignment made
+  through this same panel.
+- **`services/api.js`**: `assignOperator(id, operatorId, reason, token)` -
+  `reason` is a new, optional third argument, sent as-is; the backend
+  ignores it for a first assignment and requires it for reassignment/
+  unassignment. `managerUpdate`'s `updates` object may now also include
+  `reason` for parity with the same endpoint's assignment handling.
+- **`RequestActivityTimeline.jsx` - reason display**: `describeActivity()`
+  now returns an optional `reason` alongside each event's `title`/`detail`
+  - populated only for `REASSIGNED`/`UNASSIGNED` events recorded after this
+  ticket shipped (`null`, and simply not rendered, for older history or for
+  `ASSIGNED` events, which never have a reason by design). Rendered as a
+  separate "Reason: ..." line beneath the existing "Old → New" detail line,
+  matching the task spec's own example format. `UNASSIGNED`'s title
+  changed from the pre-DOC-15 "Operator unassigned" to "Operator removed"
+  to match the spec's exact wording.
+- **`index.css`**: `.reassign-operator-summary` (a small responsive grid
+  for the Current/New Operator labels in the reassignment panel, reusing
+  the existing `.cancel-confirm-panel` container styling); the timeline's
+  new reason line reuses the existing `.timeline-detail` class, with
+  `.timeline-reason`/`.timeline-reason-label` as light additive hooks - no
+  new color/badge system was introduced.
+- **`ManagerDashboard.jsx`**: `handleAssignOperator` now accepts and
+  forwards the optional `reason` argument through to `requestApi.assignOperator`
+  - no other change; the dashboard's own polling/refresh/error-handling
+  behavior is untouched.
+- **Build verification**: `npx vite build` completed with no errors after
+  this ticket's changes.
+
+## Request Reports & CSV Export (DOC-67)
+
+Full backend writeup (endpoint, filter reuse, CSV columns, SLA
+classification, escaping/formula-injection protection, UTF-8/BOM, export
+size policy) lives in `backend/README.md`'s own "Request Reports & CSV
+Export" section - this is the frontend-specific summary.
+
+- **`ManagerDashboard.jsx` - "Export CSV" button**: added to the
+  Organization Requests section's own header (`.admin-section-header`,
+  already a `space-between` flex row - no new CSS needed), next to the
+  existing Search/Filters/Sort controls (`RequestSearchControls`) rendered
+  immediately below it. Deliberately NOT added to `RequestSearchControls`
+  itself - that component is shared by all three dashboards, and the task
+  spec explicitly requires this button on the Manager dashboard only
+  (Employee/Operator never see it, since neither `Dashboard.jsx` nor
+  `OperatorDashboard.jsx` was touched by this ticket at all).
+- **Always sends the CURRENT filter state**: `handleExportCsv` calls
+  `requestApi.exportOrganizationCsv(token, requestFilters)` - the exact
+  same `requestFilters` state object already driving the visible table
+  (search/status/priority/category/operator/creator/date range/sort) -
+  never an unfiltered pull. A Manager who has not touched any filter
+  simply exports the full Organization list (`DEFAULT_REQUEST_FILTERS`),
+  which is the correct, expected behavior, not a special case.
+- **`services/api.js` - `exportOrganizationCsv(token, filters)`**:
+  deliberately does NOT reuse the shared `request()` helper - that helper
+  always calls `response.json()`, which would break on this endpoint's
+  real `text/csv` success response. Mirrors `request()`'s own error
+  contract on failure (the backend still returns the project's normal JSON
+  `{status, message}` error shape for a validation failure, e.g. exceeding
+  `MAX_EXPORT_ROWS`), but on success returns `{ blob, filename }` - a raw
+  `Blob` plus the filename parsed out of the backend's own
+  `Content-Disposition` header.
+- **Authenticated Blob download flow (task spec section 19 - a plain
+  browser navigation would never attach the JWT this project requires)**:
+  API call → `Blob` → `URL.createObjectURL(blob)` → a programmatically
+  created, invisible `<a download>` element → `.click()` → cleanup
+  (`document.body.removeChild` + `URL.revokeObjectURL`). The JWT is sent
+  only in the `fetch` call's own `Authorization` header - it is never
+  placed in a URL, a query parameter, or any link the browser itself
+  renders or could leak.
+- **Download UX**: `exportPending` state - button reads "Export CSV"
+  normally and "Exporting..." (and is `disabled`) while the request is in
+  flight; `handleExportCsv` also early-returns if a call is already
+  pending, so a Manager cannot fire a second overlapping export by
+  double-clicking. `exportError` state renders the backend's own safe
+  error message (e.g. the `MAX_EXPORT_ROWS` "narrow your filters" message)
+  directly above the search controls on failure - the previously-loaded
+  Request table is never cleared or affected by an export failure.
+- **DOC-53 Statistics / DOC-17 Timeline / DOC-18 Notifications - all
+  untouched by this ticket**: exporting never calls `loadStats()`, never
+  touches `RequestActivityTimeline.jsx`, and triggers no
+  `NotificationBell.jsx` update - exporting a CSV is not a business event.
+- **Build verification**: `npx vite build` completed with no errors after
+  this ticket's changes (69 modules transformed).
+
+## Error & UX Hardening (DOC-69)
+
+A hardening pass, not a redesign - most of this codebase already had solid
+loading states, empty states, confirmation panels, and disabled-during-
+request buttons from earlier tickets (DOC-15/17/18/54/57/59/67 in
+particular). This section documents the conventions this ticket
+introduced or made consistent, not a rewrite of what already worked.
+
+- **Shared API error handling**: `services/api.js`'s own `request()`
+  helper was already the one place that turns a backend JSON error
+  response into a safe `Error` (`data.message`) - most existing
+  `catch (error) { setX(error.message) }` call sites were therefore
+  already safe before this ticket. Two real gaps were fixed: (1)
+  `request()`'s own `fetch()` call, and `exportOrganizationCsv`'s separate
+  one (DOC-67), now both wrap the network call itself in `try/catch` - a
+  genuine connection failure (offline, DNS failure, server unreachable)
+  previously propagated the browser's own raw message ("Failed to fetch")
+  straight to the UI; both now throw a clean "Unable to connect to the
+  server..." message instead. (2) `utils/apiError.js`'s new
+  `getApiErrorMessage(error, fallback)` is a small, additional
+  last-line-of-defense helper - not a replacement for `request()`'s own
+  centralization - applied at the genuinely edge-adjacent call sites
+  (Login, Register, the CSV export failure handler) rather than
+  retrofitted into all ~39 pre-existing `error.message` displays, which
+  were already safe and would have been pure churn to touch.
+- **Loading / disabled conventions**: every mutating action already
+  followed (and continues to follow) the same shape - a `..Pending`
+  boolean state, the trigger button's own `disabled={pending}`, and its
+  label swapping to a clear present-participle string ("Signing in...",
+  "Assigning...", "Exporting..."). This ticket did not change this
+  pattern - it audited it broadly and found it already applied
+  consistently (Login/Register/ChangePassword/Create Request/Assign/
+  Reassign/Unassign/Cancel/Close/Upload/Remove Image/CSV Export/Chat Send/
+  Mark Notification Read all already had it).
+- **Destructive-action visual consistency**: `.btn-danger` (index.css)
+  already existed and was already used for Delete Organization/Replace
+  Manager. Three confirm-panel buttons that were behind a confirmation
+  step but still colored like a neutral primary action were switched to
+  `.btn-danger` for consistency: Manager's "Remove Operator" and "Cancel
+  Request" (`ManagerRequestRow.jsx`), Employee's "Cancel Request"
+  (`RequestRow.jsx`), and "Deactivate User" (`OrganizationUserRow.jsx`).
+  Purely a CSS class change - every one of these already sat behind its
+  own existing confirmation panel/step (DOC-15's reassignment/unassignment
+  confirmation UI, in particular, was left completely untouched).
+- **Centralized status/priority labels**: `utils/requestLabels.js` is the
+  one place `PRIORITY_LABELS`/`STATUS_LABELS` now live, replacing four
+  independent (previously identical, but drift-prone) copies in
+  `RequestRow.jsx`, `ManagerRequestRow.jsx`, `ManagerDashboard.jsx`, and
+  `RequestStatusBadge.jsx`.
+- **Network-failure behavior**: see "Shared API error handling" above - a
+  genuine connection failure now always reads "Unable to connect to the
+  server. Please check your connection and try again.", never "Failed to
+  fetch"/"Network Error" verbatim.
+- **JWT-expiry behavior (new)**: `services/api.js` exports
+  `setUnauthorizedHandler`; `AuthContext.jsx` registers a handler on
+  mount that clears auth state (reusing the existing `logout()`) whenever
+  `request()` detects an authenticated call rejected with one of the
+  EXACT strings `backend/src/middleware/auth.js`'s `verifyToken` itself
+  produces for a missing/expired/invalid token (401) or a deactivated
+  account (403) - matched by exact message text, deliberately NOT "any
+  401/403 on any authenticated call", because at least one endpoint
+  (`changePassword`) legitimately returns 401 for a genuine business
+  reason ("Current password is incorrect.") that must never trigger a
+  forced logout. `ProtectedRoute.jsx`'s existing `isAuthenticated` check
+  is what actually performs the redirect to `/login` (no new navigation
+  logic was added) - this cannot produce an infinite redirect loop, since
+  it only ever fires in reaction to a rejected API call, never in reaction
+  to the redirect itself. `Login.jsx` shows a one-time "Your session has
+  expired. Please sign in again." message via a `sessionStorage` flag the
+  handler sets and Login reads-and-clears on its own first render.
+- **Polling-failure behavior**: both existing pollers
+  (`NotificationBell.jsx`'s 20s unread-count/list poll, `OrganizationChat.jsx`'s
+  7s message poll) already failed silently on a single bad tick before
+  this ticket - confirmed intact, not changed. Neither poller ever shows
+  an error banner for a transient failure; the next tick simply tries
+  again.
+- **ErrorBoundary (new)**: `components/ErrorBoundary.jsx`, a top-level
+  class component (React error boundaries cannot be functional as of
+  React 18) wrapping the entire app in `main.jsx`, outside
+  `BrowserRouter`. Catches a genuine RENDERING exception only (never a
+  substitute for the API error handling above) and shows "Something went
+  wrong. Please refresh the page." with a reload button - never a stack
+  trace, never a `console.*` call (this project's own logging-hygiene rule
+  applies to the frontend too, not just the backend).
+- **404 page (new)**: `pages/NotFound.jsx` + a catch-all `<Route path="*">`
+  in `App.jsx` (always the LAST route). Previously an unmatched URL
+  rendered nothing at all inside `<main>`. Offers a real way back (the
+  caller's own dashboard if signed in, Home otherwise) via the same
+  `destinationForRole` helper `ProtectedRoute.jsx`/`Login.jsx` already use.
+- **Backend error contract**: audited, not changed -
+  `backend/src/middleware/errorHandler.js` already returns a generic
+  "Internal Server Error" for any 5xx (the real error is only ever
+  `console.error`'d server-side, never sent to the client) and
+  `backend/src/middleware/notFound.js` already returns clean JSON for any
+  unknown API route. Both were already exactly what this ticket asks for.
+- **System Admin dashboard**: audited - the stale "Available when Request
+  Management is enabled" placeholder this ticket's task spec warns about
+  had already been removed in an earlier pass (see `AdminDashboard.jsx`'s
+  own comment); confirmed absent, nothing to fix.
+- **Regression note**: DOC-15/16/17/18/67's own UX (reassignment/
+  unassignment confirmation UI, RequestNumberBadge, Timeline empty state
+  and reassignment-reason line, notification unread badge/panel states,
+  CSV export loading/disabled state) were all verified intact via the
+  temporary test harness below - none were altered by this ticket.
+- **Test summary**: a temporary static/logic test harness
+  (`frontend/__doc69_test.mjs`, deleted after this run) - unlike prior
+  backend tickets, this ticket has almost no backend logic to mock; it
+  instead (1) unit-tests the two new pure utilities
+  (`getApiErrorMessage`, `requestLabels.js`) directly under plain Node via
+  ESM import, and (2) runs static source-scans confirming every new wiring
+  point (network-failure handling, session-expiry message matching,
+  ErrorBoundary/NotFound registration, btn-danger swaps, centralized label
+  imports) and every regression point (DOC-15/16/17/18/67's own UX,
+  System Admin placeholder absence) actually landed correctly - **58 of 58
+  assertions passed, 0 failed**.
+- **Frontend build verification**: `npx vite build` completed with no
+  errors (73 modules transformed, up from 69 - the four new files). The
+  production bundle was also grepped for `password`/`jwt_secret`/
+  `mongodb_uri`/`aws_secret`/private-key markers - every match was
+  ordinary UI label text ("Change Password", form field names, etc.),
+  never an actual secret value.
+- **Known limitations (task spec section 47's own required disclosure)**:
+  no real browser was available in this environment - this pass verifies
+  everything statically/logically (React build success, source-level
+  wiring, pure-function correctness) but does NOT independently confirm
+  actual rendered layout, real click-driven double-submit timing, CSS
+  responsive breakpoints (320-400px/tablet/desktop), or keyboard-focus
+  visuals in a live browser. This is disclosed rather than claimed as
+  verified - genuine visual/responsive/accessibility confirmation still
+  needs a manual pass in a real browser before this ticket is considered
+  fully done in that dimension.
+
+## Organization Settings for Manager (DOC-61)
+
+The Manager Dashboard's "Organization Information" panel (DOC-42) is now
+**"Organization Settings"** - the same panel, still on the Manager
+Dashboard, no new route/page added. It is both the read view (unchanged
+data source, `GET /api/organizations/me`) and, new in this ticket, an edit
+form (`PATCH /api/organizations/me`, Manager-only on the backend - see
+`backend/README.md` "Organization Settings for Manager (DOC-61)" for the
+full authorization/validation contract).
+
+- **Editable fields**: Organization Name, Description, Contact Email,
+  Contact Phone - each a standard `.form-group` (label + input/textarea +
+  inline `.form-error`), reusing this project's existing form styling
+  rather than introducing a new form pattern. Description is rendered as
+  plain text only (a controlled `<textarea>` value), never
+  `dangerouslySetInnerHTML`.
+- **Read-only fields**: Company Code, Organization Status, Created - shown
+  in the same `.org-info-details`/`.org-card-detail` layout DOC-42 already
+  used, never rendered as inputs, so there is no way to even attempt to
+  edit them from this form. Regenerating the Company Code and activating/
+  deactivating the Organization both remain exclusively System Admin
+  actions elsewhere in the product; this panel never exposes either.
+- **Client-side validation** (`validateOrgSettingsForm`, module-level pure
+  function in `ManagerDashboard.jsx`) mirrors the backend's own rules -
+  name required/2-100 chars, description max 1000 chars, contact email
+  format (`EMAIL_REGEX`, the same shared regex `Login`/`Register` already
+  use), contact phone max 30 chars / permissive international format. This
+  is a UX convenience only; the backend re-validates everything
+  authoritatively and is what actually enforces these rules.
+- **Change tracking / Save button state**: `settingsForm` is a separate,
+  editable copy of the loaded `organization` data. `hasSettingsChanges`
+  (a `useMemo` comparing the current form values against `organization`'s
+  own last-confirmed values) drives the Save button's `disabled` state -
+  Save is disabled whenever nothing has actually changed, and again while
+  `settingsPending` is true (button text toggles `"Save Changes"` /
+  `"Saving..."`). Both conditions are re-checked inside the submit handler
+  itself, not only via the button's `disabled` attribute, so a
+  double-submit is prevented even if the disabled state were somehow
+  bypassed.
+- **Partial save**: only the fields that actually differ from
+  `organization`'s current values are included in the `PATCH` body -
+  re-saving unchanged values, or saving after editing only one field, both
+  work exactly the same way the backend's own partial-update support
+  expects.
+- **Success/error UX reuses DOC-69's shared infrastructure** -
+  `getApiErrorMessage(error, fallback)` from `utils/apiError.js` formats
+  every failure (validation 400s, network failure, session expiry) into
+  the same plain, user-safe sentence style already used everywhere else in
+  the app (e.g. *"Organization name is required."*,
+  *"Unable to connect to the server. Please try again."*) - a raw
+  `AxiosError`/`MongoServerError`/`CastError` string is never shown. A
+  successful save shows *"Organization settings updated successfully."*
+  and clears itself the moment the Manager starts editing again.
+- **No full page reload on save.** The backend's own response (the freshly
+  saved Organization) replaces local `organization` state directly, which
+  in turn re-syncs `settingsForm` - the same "update in place" pattern
+  every other mutating action in this app already uses.
+- **`organizationApi.updateMine(updates, token)`** (`services/api.js`) is
+  the one new API call this ticket added - a thin `PATCH /organizations/me`
+  wrapper, alongside the existing `organizationApi.getMine`.
+- **Not built here, on purpose**: no logo/branding upload (the ticket
+  explicitly allows deferring this; see `backend/README.md`'s own note on
+  the decision), no new page/route (the panel lives inside the existing
+  Manager Dashboard), no notification/timeline entry for a settings change
+  (not a Request lifecycle action - would only add noise).
+
+## User Profile (DOC-62)
+
+A new, single, role-agnostic **`/profile`** page
+(`src/pages/Profile.jsx`) - one page for every authenticated role
+(`system_admin`/`manager`/`operator`/`employee`), not four separate role
+variants. Reachable via a new **`My Profile`** link in the Navbar and shows
+Account Information: Full Name (editable), Email, Role, Organization,
+Account Status, and Member Since (all read-only). See
+`backend/README.md`'s "User Profile (DOC-62)" section for the full
+backend authorization/validation contract behind it.
+
+- **Data source**: `GET /api/auth/me` (unchanged, DOC-33/DOC-57) for
+  reading; a new `userSelfApi.updateMine({ fullName }, token)`
+  (`PATCH /api/users/me`) for saving. Organization display reuses the
+  existing `organizationApi.getMine()` (DOC-42) for
+  Manager/Operator/Employee; System Admin (whose `organizationId` is
+  always `null`) shows a fixed *"Platform-level account"* notice instead
+  of attempting a call that would only ever 404.
+- **Editable**: Full Name only. **Read-only**: Email (with an inline hint
+  explaining why), Role (rendered in human-readable form via the new
+  shared `roleLabel`/`ROLE_LABELS` in `utils/roleRoutes.js` - *"System
+  Admin"*/*"Manager"*/*"Operator"*/*"Employee"*, never the raw enum
+  value), Organization (the Organization's **name**, never the raw
+  `organizationId`), Account Status (the existing `StatusBadge`
+  component), Member Since (formatted `createdAt`). None of these five
+  render as inputs - there is no editable role/organization/status/date
+  control anywhere on this page, and the backend independently rejects a
+  forged attempt at any of them regardless.
+- **Change tracking / Save button state**: identical pattern to DOC-61's
+  Organization Settings form - a `hasChanges` `useMemo` comparing the
+  current input against the AuthContext's own `user.fullName` drives the
+  Save button's `disabled` state (disabled when nothing changed, and again
+  while a save is in flight), both re-checked inside the submit handler
+  itself as well, not only via the button's `disabled` attribute.
+- **AuthContext refresh, no logout/login, no page reload (task spec
+  sections 16-17)**: on a successful save, the backend's own response
+  replaces `user` via the existing `AuthContext.updateUser` (already used
+  by the DOC-57 Change Password page) - never a locally-guessed update.
+  Every component that reads `user.fullName` re-renders automatically as a
+  normal consequence of React state changing, with no extra plumbing:
+  confirmed for the Manager/Operator/Employee dashboards' own "Signed in
+  as {fullName}" subtitles. **Note**: an audit for this ticket confirmed
+  the Navbar itself does not currently render the user's name anywhere (it
+  shows role-based dashboard links and a Logout button only) - there is
+  nothing there to visibly refresh, so this is not a regression, simply
+  nothing to update.
+- **Success/error UX reuses DOC-69's shared infrastructure** -
+  `getApiErrorMessage(error, fallback)` formats every failure into the
+  same plain, user-safe sentence style used everywhere else (*"Full name
+  is required."*, *"Unable to connect to the server. Please try again."*)
+  - a raw `AxiosError`/`MongoServerError`/`CastError` string is never
+  shown. A successful save shows *"Profile updated successfully."* and
+  clears itself the moment the person starts editing again.
+- **Change Password is a link, not a second implementation.** The page's
+  `Change Password` button is a plain `<Link to="/change-password">` to
+  the existing DOC-57 page - there is no second password-change form or
+  endpoint anywhere in Profile.
+- **Navbar**: one new `My Profile` link, shown to every authenticated role,
+  hidden during the forced-password-change state the same way the
+  Dashboard/Chat/Notifications links already are (`user?.mustChangePassword`)
+  - a forced-change user is redirected away by `ProtectedRoute` before this
+  page's content would ever render anyway, so a link that could never
+  actually save anything yet would only be confusing.
+- **Not built here, on purpose**: no email editing (see the backend
+  README's own documented decision), no profile picture/avatar (no such
+  support exists anywhere in this project), no role/organization/status
+  selector of any kind, no second password-change flow.
+
+## Audit Log (DOC-64)
+
+A new `AuditLogPanel` component (`src/components/AuditLogPanel.jsx`),
+shown on both the Manager Dashboard and the Admin Dashboard - one shared
+component, not two near-duplicates, since the two views differ in exactly
+two things: an Organization filter dropdown and an extra "Organization"
+line per entry, both controlled by a single `isSystemAdmin` prop. See
+`backend/README.md`'s "Audit Log (DOC-64)" section for the full
+classification, sensitive-data-handling, and API contract this UI is
+built on top of.
+
+- **Data source**: a new `auditLogApi.list(token, params)`
+  (`GET /api/audit-logs`) - Manager-only own-Organization results,
+  System-Admin-only platform-wide results with an optional Organization
+  filter; this component never filters results client-side to fake that
+  boundary, the backend is the real one.
+- **Human-readable labels** (task spec section 33): `utils/auditLogLabels.js`
+  centralizes `AUDIT_ACTION_LABELS` (e.g. `USER_ROLE_CHANGED` → "User role
+  changed") and `formatAuditChanges` (turns a backend `{ field: { from,
+  to } }` object into ready-to-render rows, e.g. "Role: Employee →
+  Operator") - the raw enum value or a JSON blob is never shown in the UI.
+- **List display** reuses the exact same `.timeline-list`/`.timeline-item`
+  visual family DOC-17's own `RequestActivityTimeline.jsx` already
+  established, rather than inventing a second list style - each entry
+  shows the action label + timestamp, the target's display name + type,
+  every changed field as a "Label: from → to" line, and the actor's name +
+  role.
+- **Filters**: Action, Target Type, and a From/To date range are exposed
+  in the UI for both roles; System Admin additionally gets an Organization
+  dropdown (populated from `organizationApi.list`, id → name, loaded once).
+  The backend also supports an `actor` (user id) filter, but this ticket
+  deliberately does not expose a raw-id text input for it in the UI (task
+  spec section 28: "Support useful filters without overengineering") - a
+  clunky free-text id field was judged worse UX than simply omitting it;
+  the API-level support is still fully tested.
+- **Pagination**: a `Load More` button appends the next page (cursor-based,
+  newest-first) - the same `limit`/`before` shape DOC-18's own
+  `NotificationBell.jsx` already uses, never "load everything at once."
+- **Loading / empty / error UX reuses DOC-65's shared patterns** -
+  "Loading audit log..." while the first page is in flight, "No
+  administrative activity recorded yet." for a genuinely empty result, and
+  `getApiErrorMessage` for any failure - never a raw backend error string.
+- **Not built here, on purpose**: no create/edit/delete UI of any kind
+  (the backend has no such endpoints - task spec section 36), no Request
+  operational data of any kind on the System Admin view (task spec section
+  32 - this panel only ever calls `GET /api/audit-logs`).

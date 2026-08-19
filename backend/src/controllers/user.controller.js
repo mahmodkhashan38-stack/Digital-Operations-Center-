@@ -6,6 +6,13 @@ const Request = require('../models/Request');
 const {
   sanitizeUser, EMAIL_REGEX, SALT_ROUNDS, validatePassword,
 } = require('./auth.controller');
+// DOC-64 - "Audit Log". Every Manager account-management action below
+// (role change, deactivate/reactivate, password reset, specialties) and
+// the self-service Profile update at the bottom of this file record one
+// AuditLog entry AFTER their own business write has already succeeded -
+// see services/auditLog.service.js's own top comment for the full
+// failure-strategy/sanitization contract this relies on.
+const { recordAuditLog } = require('../services/auditLog.service');
 
 // DOC-35 - Manage Organization User Roles. DOC-48 - Organization Employee
 // Removal.
@@ -258,10 +265,210 @@ const updateUserRole = async (req, res, next) => {
     // nothing in this function ever assigns to targetUser.organizationId,
     // so a request body containing organizationId (or anything else) has
     // no effect on organization membership.
+    const previousRole = targetUser.role;
     targetUser.role = requestedRole;
     await targetUser.save();
 
+    // DOC-64 - "Audit Log". Target is the User whose role changed, not the
+    // Manager who changed it (the Manager is `actorId`) - matches task
+    // spec section 17's exact shape.
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: req.user.organizationId,
+      action: 'USER_ROLE_CHANGED',
+      targetType: 'User',
+      targetId: targetUser._id,
+      changes: { role: { from: previousRole, to: targetUser.role } },
+      metadata: { targetUserName: targetUser.fullName },
+    });
+
     return respondWithUser(req, res, 200, targetUser);
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ status: 'error', message: error.message });
+    }
+    return next(error);
+  }
+};
+
+// DOC-62 - "User Profile". Bounds for the ONE field a user may edit about
+// themselves through PATCH /api/users/me below. No such bound existed on
+// `fullName` anywhere before this ticket (Register.jsx and DOC-50's own
+// Manager-facing `updateUserProfile` below only ever required "non-empty
+// after trim") - this is a new, deliberately reasonable application-layer
+// rule for the new self-service endpoint specifically, mirroring the same
+// 2-100 shape already established for Organization Name (DOC-61).
+const MIN_SELF_FULLNAME_LENGTH = 2;
+const MAX_SELF_FULLNAME_LENGTH = 100;
+
+// A pure validator, same shape as every other validator in this project
+// (returns `null` when valid, a client-safe string otherwise). The
+// `typeof fullName !== 'string'` check runs FIRST, so an object/array
+// payload (task spec section 6: "Do not allow object/array payloads.") is
+// rejected here rather than reaching `.trim()` and throwing.
+function validateSelfFullName(fullName) {
+  if (typeof fullName !== 'string') {
+    return 'Full name is required.';
+  }
+  const trimmed = fullName.trim();
+  if (trimmed.length === 0) {
+    return 'Full name is required.';
+  }
+  if (trimmed.length < MIN_SELF_FULLNAME_LENGTH || trimmed.length > MAX_SELF_FULLNAME_LENGTH) {
+    return `Full name must be between ${MIN_SELF_FULLNAME_LENGTH} and ${MAX_SELF_FULLNAME_LENGTH} characters.`;
+  }
+  return null;
+}
+
+// DOC-62 - the explicit, hard-rejected denylist for PATCH /api/users/me
+// (task spec section 5/30: "Do NOT use mass assignment" / "mixed valid +
+// forbidden payload rejected entirely with no partial update"), the same
+// "reject clearly, never silently drop" shape DOC-61's own
+// FORBIDDEN_ORGANIZATION_SELF_UPDATE_FIELDS established for
+// PATCH /api/organizations/me. Checked BEFORE `fullName` is even looked
+// at, so `{ fullName: "New Name", role: "system_admin" }` is rejected in
+// full, never partially applied.
+//
+// `email` is included here on purpose - see this endpoint's own top
+// comment (`updateMyProfile` below) for the full read-only-email decision
+// and reasoning (task spec section 7/32: "If Email remains read-only...
+// forged email update rejected"). `specialties` is included defensively
+// even though nothing about this endpoint would otherwise touch it - DOC-44
+// specialties remain exclusively Manager-managed (task spec section 22),
+// and this keeps that true even against a forged self-update payload.
+const FORBIDDEN_SELF_PROFILE_FIELDS = [
+  'role', 'organizationId', 'isActive', 'password', 'passwordHash',
+  'mustChangePassword', 'createdAt', 'updatedAt', '_id', 'id',
+  'email', 'specialties',
+];
+
+// PATCH /api/users/me (any authenticated, non-forced-password-change user -
+// system_admin/manager/operator/employee alike)
+//
+// DOC-62 - "User Profile". The self-service counterpart to
+// GET /api/auth/me (auth.controller.js) - reads/derives the target user
+// EXCLUSIVELY from `req.user.userId` (populated by middleware/auth.js from
+// the verified JWT, then re-confirmed against a fresh database read here),
+// never from `req.params`/`req.body`/`req.query`. There is no `:id` in
+// this route at all, so it is structurally incapable of updating any User
+// document other than the caller's own, regardless of what a client sends
+// - the same "derive identity from the trusted server-side context, not
+// from anything client-supplied" contract every other self-scoped endpoint
+// in this project already uses (DOC-42/DOC-61's own `/organizations/me`).
+//
+// SECURITY - explicit allowlist of exactly one field (`fullName`), never
+// mass assignment: `FORBIDDEN_SELF_PROFILE_FIELDS` is checked first and
+// rejects the entire request (400) if the body contains any of
+// role/organizationId/isActive/password/passwordHash/mustChangePassword/
+// createdAt/updatedAt/_id/id/email/specialties - never silently ignored,
+// never partially applied. A user can never change their own role
+// (task spec's own standing constraint), organization, or activate/
+// reactivate themselves through this or any other endpoint.
+//
+// EMAIL DECISION (task spec section 7, "Do NOT casually implement email
+// editing... Prefer read-only if no strong product need exists."): kept
+// READ-ONLY here, deliberately. The audit for this ticket confirmed a
+// self-service email change COULD be made technically safe - the JWT
+// payload only ever carries `{ userId, role }` (never email,
+// controllers/auth.controller.js's `login`), and middleware/auth.js's
+// `verifyToken` re-reads the user by `_id` on every request, never by
+// email - so a changed email would not invalidate any existing session or
+// require a token refresh. However, no product requirement in this ticket
+// calls for it, and enabling it would add a second live email-uniqueness/
+// normalization/collision surface to reason about and test (on top of the
+// one DOC-50's Manager-facing `updateUserProfile` below already owns) for
+// zero requested benefit, with no email-confirmation flow in this project
+// to guard against a mistyped/hijacked address. If a genuine product need
+// for self-service email changes emerges later, the safest next step is to
+// mirror `updateUserProfile`'s own already-audited pattern (format
+// validation + normalize + uniqueness check) here, not to invent a new one.
+//
+// DOC-64 AUDIT LOG READINESS (task spec section 27, explicitly NOT built
+// here): kept intentionally small and linear - validate, save, respond -
+// specifically so a future DOC-64 change can insert one
+// `recordAuditLogEntry(...)` call after the `.save()` below without
+// needing to restructure this function, the same readiness note DOC-61's
+// `updateMyOrganization` already established for its own endpoint.
+const updateMyProfile = async (req, res, next) => {
+  try {
+    const body = req.body || {};
+
+    const forbiddenField = FORBIDDEN_SELF_PROFILE_FIELDS.find(
+      (field) => Object.prototype.hasOwnProperty.call(body, field),
+    );
+    if (forbiddenField) {
+      return res.status(400).json({
+        status: 'error',
+        message: `${forbiddenField} cannot be updated through this endpoint.`,
+      });
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(body, 'fullName')) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'No valid fields to update. Allowed fields: fullName.',
+      });
+    }
+
+    const fullNameError = validateSelfFullName(body.fullName);
+    if (fullNameError) {
+      return res.status(400).json({ status: 'error', message: fullNameError });
+    }
+
+    // A fresh, per-request read of the caller's OWN document, by `_id`
+    // only - `req.user.userId` comes from middleware/auth.js's own
+    // database-backed verification, already re-confirmed as an active
+    // account on this same request (verifyToken rejects a deactivated
+    // account with 403 before any route handler runs). The `!user` guard
+    // below is defensive only (the account could theoretically be deleted
+    // in the narrow window between verifyToken and this line), matching
+    // every other controller's own "re-fetch, then guard" shape in this
+    // project rather than trusting req.user as if it were the live
+    // document.
+    const user = await User.findById(req.user.userId);
+    if (!user) {
+      return res.status(404).json({ status: 'error', message: 'User not found.' });
+    }
+
+    // Only ever this ONE field is ever assigned - no
+    // `Object.assign(user, body)`, no spread of the request body, nothing
+    // that could pick up a field this function has not explicitly decided
+    // to allow.
+    const previousFullName = user.fullName;
+    user.fullName = body.fullName.trim();
+    await user.save();
+
+    // DOC-64 - "Audit Log" (task spec section 23: "Decide whether
+    // self-profile fullName change belongs in Audit Log. Recommended:
+    // PROFILE_UPDATED"). `actorId` and the target User are the SAME
+    // person here - unlike Notification's own actor-exclusion rule (never
+    // notify yourself about your own action), Audit Log has no such
+    // restriction: "Manager Mahmoud updated own profile" is exactly the
+    // kind of fact this collection exists to answer. Only recorded when
+    // the name GENUINELY changed (task spec section 43 item 32: "unchanged
+    // name creates no log") - `organizationId` is `req.user.organizationId`
+    // (null for system_admin, whose own profile edit is genuinely
+    // platform-level, task spec section 4). No Notification is created for
+    // this (task spec section 23: "Do not create Notification" - this
+    // endpoint never did and still does not).
+    if (previousFullName !== user.fullName) {
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: req.user.organizationId,
+        action: 'PROFILE_UPDATED',
+        targetType: 'User',
+        targetId: user._id,
+        changes: { fullName: { from: previousFullName, to: user.fullName } },
+        metadata: { targetUserName: user.fullName },
+      });
+    }
+
+    // sanitizeUser (auth.controller.js) - the exact same safe shape
+    // GET /api/auth/me already returns (id, fullName, email, role,
+    // organizationId, isActive, mustChangePassword, createdAt) - never
+    // passwordHash. AuthContext.jsx's existing `updateUser` accepts this
+    // shape directly, with no adapter needed on the frontend.
+    return res.status(200).json({ status: 'success', data: sanitizeUser(user) });
   } catch (error) {
     if (error.name === 'ValidationError') {
       return res.status(400).json({ status: 'error', message: error.message });
@@ -452,8 +659,27 @@ const updateUserStatus = async (req, res, next) => {
     // Request, NEVER touches createdBy, and NEVER cascades to Comments or
     // attachments (task spec section 10) - the only field written here is
     // this User document's own isActive.
+    const previousIsActive = targetUser.isActive;
     targetUser.isActive = body.isActive;
     await targetUser.save();
+
+    // DOC-64 - "Audit Log" (task spec section 18). This endpoint is
+    // deliberately idempotent (setting isActive to the value it already
+    // has is a normal success, not an error - see this function's own top
+    // comment) - an audit entry is only recorded when the value GENUINELY
+    // changed, so a double-click/slow-retry never produces two identical
+    // "deactivated" entries back to back.
+    if (previousIsActive !== targetUser.isActive) {
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: req.user.organizationId,
+        action: targetUser.isActive ? 'USER_REACTIVATED' : 'USER_DEACTIVATED',
+        targetType: 'User',
+        targetId: targetUser._id,
+        changes: { isActive: { from: previousIsActive, to: targetUser.isActive } },
+        metadata: { targetUserName: targetUser.fullName },
+      });
+    }
 
     return respondWithUser(req, res, 200, targetUser, warning ? { warning } : undefined);
   } catch (error) {
@@ -540,11 +766,44 @@ const updateUserSpecialties = async (req, res, next) => {
       }
     }
 
+    // DOC-64 - captured BEFORE the overwrite below, so the audit entry can
+    // show real before/after CATEGORY NAMES (task spec section 20: "Store
+    // safe before/after category identities/names. Do not store full
+    // Category documents.") - never the full previous Category documents,
+    // just their ids for this one lookup and then their names.
+    const previousSpecialtyIds = (targetUser.specialties || []).map((categoryId) => String(categoryId));
+
     // Store the ids from the RESOLVED documents, not the client's raw
     // strings - defense in depth, the same spirit as createServiceCategory
     // storing `name.trim()` rather than raw input.
     targetUser.specialties = resolvedCategories.map((category) => category._id);
     await targetUser.save();
+
+    // DOC-64 - only recorded when the specialty SET genuinely changed
+    // (task spec section 42 item 30-adjacent principle - "unchanged
+    // creates no log" already applied elsewhere in this file/DOC-61).
+    const newSpecialtyIds = resolvedCategories.map((category) => String(category._id));
+    const specialtiesChanged = previousSpecialtyIds.length !== newSpecialtyIds.length
+      || previousSpecialtyIds.some((id) => !newSpecialtyIds.includes(id));
+    if (specialtiesChanged) {
+      const previousCategories = previousSpecialtyIds.length > 0
+        ? await ServiceCategory.find({ _id: { $in: previousSpecialtyIds } })
+        : [];
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: req.user.organizationId,
+        action: 'USER_SPECIALTIES_CHANGED',
+        targetType: 'User',
+        targetId: targetUser._id,
+        changes: {
+          specialties: {
+            from: previousCategories.map((category) => category.name),
+            to: resolvedCategories.map((category) => category.name),
+          },
+        },
+        metadata: { targetUserName: targetUser.fullName },
+      });
+    }
 
     const categoryMap = new Map(
       resolvedCategories.map((category) => [String(category._id), { id: category._id, name: category.name }]),
@@ -626,6 +885,24 @@ const resetUserPassword = async (req, res, next) => {
     targetUser.mustChangePassword = true;
     await targetUser.save();
 
+    // DOC-64 - "Audit Log" (task spec sections 7/19 - CRITICAL). `changes`
+    // is deliberately `null` here, not `{ password: {...} }` - there is no
+    // safe "from/to" value for a password. `metadata` is limited to a safe
+    // identity only (`targetUserId`/`targetUserName`) - NEVER the new
+    // password, NEVER passwordHash, NEVER anything password-shaped. This
+    // is the one call site in this project where getting sanitization
+    // wrong would be most damaging, so it is kept maximally simple and
+    // explicit rather than building `metadata` from any larger object.
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: req.user.organizationId,
+      action: 'USER_PASSWORD_RESET',
+      targetType: 'User',
+      targetId: targetUser._id,
+      changes: null,
+      metadata: { targetUserId: targetUser._id, targetUserName: targetUser.fullName },
+    });
+
     // respondWithUser already reuses sanitizeUserWithSpecialties ->
     // sanitizeUser, which never includes passwordHash/the new password/a
     // bcrypt salt - the response here is identical in shape to every
@@ -644,6 +921,7 @@ module.exports = {
   listOrganizationUsers,
   updateUserRole,
   updateUserProfile,
+  updateMyProfile,
   updateUserStatus,
   updateUserSpecialties,
   resetUserPassword,

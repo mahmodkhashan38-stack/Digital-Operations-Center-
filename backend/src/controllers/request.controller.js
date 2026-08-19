@@ -4,16 +4,29 @@ const ServiceCategory = require('../models/ServiceCategory');
 const User = require('../models/User');
 const { canTransitionRequestStatus } = require('../utils/requestStatusTransitions');
 const {
-  validateTitle, validateDescription, validatePriority, validateCancelReason,
+  validateTitle, validateDescription, validatePriority, validateCancelReason, validateAssignmentReason,
 } = require('../utils/requestFieldValidation');
 const { cleanupUploadedFiles } = require('../middleware/upload');
 const requestImageStorage = require('../services/requestImageStorage');
+const { recordRequestActivity } = require('../services/requestActivity.service');
+const RequestActivity = require('../models/RequestActivity');
+const { createRequestNotification } = require('../services/notification.service');
 const { buildRequestQuery, sortRequestDocs, buildCreatedAtRangeFilter } = require('../utils/requestQueryBuilder');
 const { computeRequestStatistics, computeOperatorWorkload, computeSlaStatistics } = require('../utils/requestStatistics');
 const { findDuplicateRequests } = require('../utils/duplicateRequestDetection');
 const {
-  SLA_HOURS_BY_PRIORITY, calculateSlaDueAt, computeSlaSummary,
+  SLA_HOURS_BY_PRIORITY, calculateSlaDueAt, computeSlaSummary, classifyExportSlaStatus,
 } = require('../utils/slaPolicy');
+// DOC-67 - "Request Reports & CSV Export". The one place CSV
+// escaping/formula-injection protection is implemented - see
+// utils/csvExport.js's own header comment for the full rationale.
+const { buildCsv } = require('../utils/csvExport');
+// DOC-16 - "Request Number / Human-Friendly ID". The sole entry point for
+// atomically allocating a new `REQ-000001`-style identifier at creation
+// time - see services/requestNumber.service.js's own comment for the full
+// concurrency/format rationale. Never read/written anywhere else in this
+// controller.
+const { getNextRequestNumber } = require('../services/requestNumber.service');
 
 // DOC-10 - Create a New Request. DOC-11 - View Request Details and
 // Status (Employee's own Requests only). DOC-12 - Update Request
@@ -116,6 +129,15 @@ const buildAttachmentContentUrl = (requestId, attachmentId) => `/requests/${requ
 
 const sanitizeRequest = (request, category, assignedOperator, createdByUser, cancelledByUser) => ({
   id: request._id,
+  // DOC-16 - human-facing identifier. `id` above (the raw ObjectId) is
+  // deliberately still included and unchanged - the frontend still needs
+  // it for API routing/internal behavior (task spec section 13) - this is
+  // purely an ADDITION, never a replacement. `null` for a historical,
+  // pre-DOC-16 Request that hasn't been migrated yet (the same documented
+  // "not available yet" shape already used for `sla` below) - the
+  // frontend is expected to fall back to showing the title in that case,
+  // never a raw ObjectId (task spec section 14).
+  requestNumber: request.requestNumber || null,
   title: request.title,
   description: request.description,
   category: category ? { id: category._id, name: category.name } : null,
@@ -156,6 +178,23 @@ const sanitizeRequest = (request, category, assignedOperator, createdByUser, can
   createdAt: request.createdAt,
   updatedAt: request.updatedAt,
 });
+
+// DOC-16 (task spec section 15) - "DOC-18 notifications should now use
+// requestNumber where appropriate, e.g. 'Request REQ-000123 was assigned to
+// you.'" One small, shared helper (not fourteen separate inline
+// conditionals) so every DOC-18 notification message below quotes a
+// Request the exact same way. Prefers `Request REQ-000123` (no quotes -
+// matches the task spec's own example verbatim) when a requestNumber is
+// present; falls back to the pre-DOC-16 quoted-title shape (`"${title}"`)
+// for a historical Request that has not been migrated yet (task spec:
+// requestNumber is presentation metadata only - a Request missing one must
+// still be describable). This ONLY affects notification message text -
+// notification.service.js's own `requestId` field (used for navigation/
+// authorization) is completely untouched, still always the internal
+// ObjectId (task spec: "Do NOT replace requestId foreign-key behavior.").
+function requestNotificationLabel(requestDoc) {
+  return requestDoc.requestNumber ? `Request ${requestDoc.requestNumber}` : `"${requestDoc.title}"`;
+}
 
 // S3 MIGRATION - best-effort deletion of one or more newly-uploaded
 // attachments' underlying storage objects, used ONLY as failure-path
@@ -319,6 +358,24 @@ function rejectWithCleanup(req, res, statusCode, message) {
   return res.status(statusCode).json({ status: 'error', message });
 }
 
+// DOC-18 - "In-App Notifications". Resolves the single active Manager of
+// an Organization, used ONLY by the two call sites below that notify "the
+// Manager" of an organization-level event (Request reopened). Mirrors the
+// same `{organizationId, role: 'manager'}` shape organization.controller.js
+// already uses to resolve a Manager from an Organization's own
+// `managerId` - here queried directly by `organizationId` instead (every
+// User document, Manager included, already carries its own
+// `organizationId` - DOC-32/34's own creation flow sets it), which avoids
+// this controller needing to import the Organization model just for this.
+// Returns `null` (never throws) for an Organization with no active Manager
+// yet - a real, normal state (DOC-32: an Organization can exist before a
+// Manager is assigned) - callers simply skip the Manager notification in
+// that case, exactly like every other "recipient could not be resolved"
+// case in this file.
+async function findOrganizationManager(organizationId) {
+  return User.findOne({ organizationId, role: 'manager', isActive: true });
+}
+
 const createRequest = async (req, res, next) => {
   try {
     const body = req.body || {};
@@ -417,6 +474,12 @@ const createRequest = async (req, res, next) => {
         // exposed here.
         const duplicates = duplicateMatches.map(({ request: candidate }) => ({
           id: candidate._id,
+          // DOC-16 - shown alongside `id` so the frontend can display
+          // "REQ-000123" for the candidate the same way it does everywhere
+          // else a Request is shown to a user; `null` for a not-yet-
+          // migrated historical candidate (see sanitizeRequest's own
+          // comment).
+          requestNumber: candidate.requestNumber || null,
           title: candidate.title,
           status: candidate.status,
           createdAt: candidate.createdAt,
@@ -480,16 +543,46 @@ const createRequest = async (req, res, next) => {
       return next(error);
     }
 
+    // DOC-16 - "Request Number / Human-Friendly ID". Allocated AFTER every
+    // validation/duplicate-detection check above has already passed (task
+    // spec section 8: "Do not consume numbers unnecessarily before
+    // validation") but BEFORE Request.create() - if this fails, no number
+    // has been wasted on a Request that was never going to be created
+    // anyway, and if Request.create() itself fails afterward, this
+    // specific number is simply never reused (documented policy: sequence
+    // gaps are acceptable, duplicates are not - see
+    // requestNumber.service.js). Unlike DOC-17/DOC-18's best-effort
+    // writes, a failure here MUST abort creation entirely (task spec
+    // section 26) - a Request silently created without a requestNumber
+    // would be a permanent data-integrity gap on a field this project's
+    // schema also treats as unique.
+    let requestNumber;
+    try {
+      requestNumber = await getNextRequestNumber();
+    } catch (error) {
+      // Matches the exact same rollback used in the Request.create()
+      // failure handler just below - by this point attachments were
+      // already uploaded to GridFS/S3 (memoryStorage, not local disk -
+      // see the GRIDFS MIGRATION comment above), so the correct cleanup
+      // is the storage-object rollback, not cleanupUploadedFiles (which
+      // only ever applies to pre-upload Multer state).
+      await cleanupNewlyUploadedAttachments(attachments);
+      return next(error);
+    }
+
     // Explicit server-side construction (GOOD pattern from the task spec) -
     // never `Request.create({ ...req.body })`. organizationId and
     // createdBy come exclusively from req.user (DOC-38's fresh per-request
     // context); status and assignedOperatorId are hardcoded to their
     // initial values and cannot be influenced by the request body at all,
-    // regardless of what it contains.
+    // regardless of what it contains. requestNumber is likewise never
+    // read from `body` - the frontend cannot supply or influence it (task
+    // spec section 3).
     let request;
     try {
       request = await Request.create({
         _id: requestId,
+        requestNumber,
         title: body.title.trim(),
         description: body.description.trim(),
         categoryId: category._id,
@@ -516,8 +609,39 @@ const createRequest = async (req, res, next) => {
       if (error.name === 'ValidationError') {
         return res.status(400).json({ status: 'error', message: error.message });
       }
+      // DOC-16 task spec section 26 - "If a generated requestNumber
+      // collides unexpectedly, handle duplicate-key failure safely. Do
+      // not expose raw MongoDB errors to frontend." A code-11000 error on
+      // this specific unique index should never happen in practice (the
+      // counter is atomic and monotonically increasing), but is handled
+      // defensively rather than leaking a raw driver error message/stack
+      // to the client.
+      if (error.code === 11000 && error.keyPattern && error.keyPattern.requestNumber) {
+        return res.status(500).json({
+          status: 'error',
+          message: 'Could not generate a unique request number. Please try again.',
+        });
+      }
       return next(error);
     }
+
+    // DOC-17 - "Request Activity Timeline". Recorded AFTER Request.create()
+    // has already succeeded (this service never blocks or rolls back the
+    // primary business action - see requestActivity.service.js's own
+    // documented failure strategy). metadata snapshots the initial
+    // priority/category/status at creation time - never the full
+    // description or any sensitive/heavy field (task spec section 11).
+    await recordRequestActivity({
+      request,
+      actorId: req.user.userId,
+      type: 'REQUEST_CREATED',
+      metadata: {
+        initialPriority: priority,
+        initialCategoryId: category._id,
+        initialCategoryName: category.name,
+        initialStatus: 'open',
+      },
+    });
 
     // assignedOperatorId is always null at creation - no lookup needed.
     return res.status(201).json({ status: 'success', data: sanitizeRequest(request, category, null) });
@@ -743,6 +867,219 @@ const listOrganizationRequests = async (req, res, next) => {
   }
 };
 
+// GET /api/requests/organization/export (manager only)
+//
+// DOC-67 - "Request Reports & CSV Export". Manager-only CSV export of the
+// EXACT SAME logical Request set `listOrganizationRequests` above would
+// return for the same query string - this handler deliberately reuses
+// `buildRequestQuery`/`fetchSortedRequests`/`buildRequestEnrichmentMaps`/
+// `buildCreatorMap` (the identical helpers, called the identical way,
+// with the identical `baseQuery = { organizationId: req.user.organizationId }`)
+// rather than building any second, independent filter/query implementation
+// (task spec section 4/23: "Do NOT implement a second independent filter
+// system... The normal Manager list and exported CSV should return the
+// same logical Request set given the same filters."). Authorization is
+// the router's job (see routes/request.routes.js - the exact same
+// requireRole('manager') + requireOrganizationMembership +
+// requireActiveOrganization chain as listOrganizationRequests, registered
+// as a distinct route so Employee/Operator/System Admin tokens never reach
+// this function at all); `organizationId` is never read from the request
+// body or query string here either - only from `req.user.organizationId`
+// (the authenticated Manager's own, DB-verified Organization - DOC-38),
+// exactly like every other Manager-scoped endpoint in this controller.
+//
+// EXPORT SIZE POLICY (task spec section 15, a documented, deliberate
+// choice): `listOrganizationRequests` itself has no result-count ceiling
+// today (consistent with this project's existing, documented "acceptable
+// at this project's scale" precedent - see requestQueryBuilder.js's own
+// header comment) - but an unbounded CSV export is a different risk
+// profile (a single large response held fully in memory - see "STREAMING
+// VS MEMORY" below). `MAX_EXPORT_ROWS` below is DELIBERATELY the
+// documented safety ceiling: rather than silently truncating a report to
+// the first N rows (which would look complete but quietly omit data - the
+// task spec explicitly warns against exactly this: "report clearly rather
+// than silently truncating if practical"), a matched-count that exceeds
+// the ceiling is rejected up front, before any row is ever fetched or
+// formatted, with a clear, actionable error message asking the Manager to
+// narrow their filters - never a partial file.
+const MAX_EXPORT_ROWS = 5000;
+
+// Safe, deterministic per-cell fallbacks for the CSV export - never a raw
+// MongoDB ObjectId as the primary visible value for any of these (task
+// spec section 6/7/8/9), and never a crash if a referenced User/Category
+// cannot be resolved (task spec: "Do not crash export."). Mirrors the
+// exact same "historical, since-deleted/deactivated reference" tolerance
+// `sanitizeRequest`/`buildRequestEnrichmentMaps` already have elsewhere in
+// this controller - Categories/Users are never hard-deleted in this
+// project, so an unresolved reference here is a defensive fallback for an
+// edge case, not an expected everyday occurrence.
+function exportRequestNumberCell(requestDoc) {
+  return requestDoc.requestNumber || 'N/A';
+}
+
+function exportEmployeeNameCell(createdByUser) {
+  if (!createdByUser) return 'Unknown User';
+  return createdByUser.fullName || 'Unknown User';
+}
+
+function exportOperatorNameCell(requestDoc, assignedOperator) {
+  if (!requestDoc.assignedOperatorId) return 'Unassigned';
+  if (!assignedOperator) return 'Unknown User';
+  return assignedOperator.fullName || 'Unknown User';
+}
+
+function exportCategoryNameCell(category) {
+  if (!category) return 'Unknown Category';
+  return category.name || 'Unknown Category';
+}
+
+// DOC-67 (task spec section 10) - ISO 8601 throughout, deliberately - a
+// CSV is a machine-friendly export format first; the frontend/Manager may
+// open it in Excel/Sheets, which both parse a `2026-08-16T14:25:00.000Z`
+// string correctly on their own. No locale-specific or human-phrased
+// formatting is ever applied here (that is a presentation choice this
+// project already reserves for the frontend elsewhere, e.g.
+// `toLocaleString()` in RequestActivityTimeline.jsx - never the backend).
+// `null`/`undefined` becomes the same neutral `'N/A'` fallback text used
+// for every other missing value in this export, never an empty Date or a
+// crash.
+function exportDateCell(value) {
+  if (!value) return 'N/A';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return 'N/A';
+  return date.toISOString();
+}
+
+const CSV_HEADERS = [
+  'Request Number', 'Title', 'Employee', 'Operator', 'Category', 'Priority', 'Status',
+  'Created At', 'Updated At', 'SLA Due At', 'SLA Status', 'Resolved At', 'Closed At',
+  'Cancellation Reason',
+];
+
+// Builds one CSV row per Request, in the exact same column order as
+// CSV_HEADERS above. Deliberately excludes anything the task spec calls
+// out as out-of-scope for this report (section 6/26/27): no raw
+// ObjectId as a primary identifier, no password/passwordHash/JWT, no
+// organization internal id, no S3 objectKey/GridFS fileId/image binary,
+// no Comments, no full RequestActivity history - this is a high-level
+// Request report, not an attachment or audit-log export. "Cancellation
+// Reason" is included because it is already visible to a Manager on every
+// existing Request response (`sanitizeRequest`'s own `cancelReason`
+// field, task spec section 6's own "only if currently visible to
+// Manager" condition) - empty string (never 'N/A') for a Request that was
+// never cancelled, matching this column's own natural "nothing to say"
+// state rather than implying "unknown".
+function buildExportRow(requestDoc, category, assignedOperator, createdByUser) {
+  return [
+    exportRequestNumberCell(requestDoc),
+    requestDoc.title,
+    exportEmployeeNameCell(createdByUser),
+    exportOperatorNameCell(requestDoc, assignedOperator),
+    exportCategoryNameCell(category),
+    requestDoc.priority,
+    requestDoc.status,
+    exportDateCell(requestDoc.createdAt),
+    exportDateCell(requestDoc.updatedAt),
+    exportDateCell(requestDoc.slaDueAt),
+    classifyExportSlaStatus(requestDoc),
+    exportDateCell(requestDoc.resolvedAt),
+    exportDateCell(requestDoc.closedAt),
+    requestDoc.cancelReason || '',
+  ];
+}
+
+// STREAMING VS MEMORY (task spec section 16, a documented, deliberate
+// choice): this project's expected scale (a university graduation project,
+// not a production multi-tenant SaaS) plus the MAX_EXPORT_ROWS ceiling
+// above together bound this endpoint's worst case to a few thousand short
+// text rows - comfortably small enough to build as one in-memory string
+// and send in a single response, exactly like every other JSON list
+// endpoint in this controller already does (listOrganizationRequests
+// itself has no streaming infrastructure either). A dedicated CSV
+// streaming pipeline (chunked transfer-encoding, a Node Transform stream,
+// etc.) was deliberately NOT introduced - it would be meaningfully more
+// implementation/testing surface for a project at this scale, matching
+// this project's own established "keep it simple" precedent (see
+// requestQueryBuilder.js's own header comment on avoiding an aggregation
+// pipeline for the same reason). No temporary file is ever written to
+// disk - the CSV is generated as a string in memory and sent directly as
+// the HTTP response body (task spec section 40: "Prefer direct CSV
+// response rather than creating server-side permanent files.").
+const exportOrganizationRequestsCsv = async (req, res, next) => {
+  try {
+    const baseQuery = { organizationId: req.user.organizationId };
+    const {
+      query, sortBy, sortOrder, error,
+    } = await buildRequestQuery({
+      baseQuery,
+      queryParams: req.query,
+      role: req.user.role,
+      organizationId: req.user.organizationId,
+    });
+    if (error) {
+      return res.status(error.status).json({ status: 'error', message: error.message });
+    }
+
+    const totalMatched = await Request.countDocuments(query);
+    if (totalMatched > MAX_EXPORT_ROWS) {
+      return res.status(400).json({
+        status: 'error',
+        message: `Too many requests match the current filters (${totalMatched}). Please narrow your filters - CSV export supports at most ${MAX_EXPORT_ROWS} requests at a time.`,
+      });
+    }
+
+    // DOC-67 (task spec section 21, a documented, deliberate choice): a
+    // filter combination that matches zero Requests still produces a
+    // valid, headers-only CSV (HTTP 200), never a 404/empty-body response.
+    // This is the cleaner of the two options the task spec itself offers
+    // for a reporting endpoint - a Manager who exports an intentionally
+    // narrow (or genuinely empty) filter combination gets a real,
+    // openable CSV file with the correct column headers and zero data
+    // rows, rather than an error to interpret or an empty file with no
+    // indication of what columns they would have gotten.
+    const requestDocs = totalMatched === 0 ? [] : await fetchSortedRequests(query, sortBy, sortOrder);
+
+    const [{ categoryMap, operatorMap }, creatorMap] = await Promise.all([
+      buildRequestEnrichmentMaps(requestDocs, req.user.organizationId),
+      buildCreatorMap(requestDocs, req.user.organizationId),
+    ]);
+
+    const rows = requestDocs.map((doc) => buildExportRow(
+      doc,
+      categoryMap.get(String(doc.categoryId)) || null,
+      doc.assignedOperatorId ? (operatorMap.get(String(doc.assignedOperatorId)) || null) : null,
+      creatorMap.get(String(doc.createdBy)) || null,
+    ));
+
+    const csvBody = buildCsv(CSV_HEADERS, rows);
+
+    // UTF-8 / HEBREW-ARABIC SUPPORT (task spec section 14): a leading
+    // UTF-8 BOM ('\uFEFF') is prepended so Microsoft Excel - which does
+    // NOT reliably auto-detect a BOM-less UTF-8 CSV and will otherwise
+    // often mis-render non-ASCII text (Hebrew/Arabic full names, Category
+    // names, reassignment reasons, etc.) - opens this file correctly.
+    // Every other modern CSV consumer (Google Sheets, LibreOffice, a
+    // second read by this same project) tolerates a leading BOM without
+    // issue, so this is a strict compatibility improvement, never a
+    // regression for a non-Excel consumer. Written as the explicit
+    // `'\uFEFF'` escape (not a literal pasted character) so this file's
+    // own on-disk encoding can never accidentally corrupt or drop it.
+    const csvWithBom = `\uFEFF${csvBody}`;
+
+    // Safe, non-user-controlled filename (task spec section 5: "Use a
+    // safe filename.") - built entirely from the server's own current UTC
+    // date, never from any request input (title, filters, Manager name,
+    // etc.), so there is no path-traversal or header-injection surface
+    // here at all.
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="requests-${dateStamp}.csv"`);
+    return res.status(200).send(csvWithBom);
+  } catch (error) {
+    return next(error);
+  }
+};
+
 // GET /api/requests/assigned (operator only)
 //
 // DOC-52 - "Operator sees only assigned Requests": scoped by BOTH
@@ -951,6 +1288,112 @@ const updateRequestStatus = async (req, res, next) => {
 
     await requestDoc.save();
 
+    // DOC-17 - one meaningful timeline event per status-changing action,
+    // never two for the same transition (task spec section 18: "avoid
+    // duplicate timeline entries... prefer one meaningful event per user
+    // action"). 'closed' and 'reopened' are meaningful enough business
+    // milestones to get their own specialized type (matching
+    // managerCloseRequest's own REQUEST_CLOSED below, and the fact that
+    // this is the ONLY code path that can ever reach 'reopened' at all -
+    // there is no separate dedicated reopen endpoint); every other
+    // transition (open->in_progress, in_progress->resolved,
+    // reopened->in_progress) records the generic STATUS_CHANGED.
+    // 'cancelled' can never be reached through this endpoint at all (see
+    // canTransitionRequestStatus's own top comment), so it is never a
+    // possible `nextStatus` here.
+    await recordRequestActivity({
+      request: requestDoc,
+      actorId: req.user.userId,
+      type: nextStatus === 'closed' ? 'REQUEST_CLOSED' : nextStatus === 'reopened' ? 'REQUEST_REOPENED' : 'STATUS_CHANGED',
+      oldValue: previousStatus,
+      newValue: nextStatus,
+    });
+
+    // DOC-18 - "In-App Notifications". Reuses this same successful
+    // transition path (task spec section 34: "Prefer directly calling
+    // recordRequestActivity(...) createNotification(...) from the same
+    // successful transition path" - never a second pass that reads the
+    // Timeline back to decide notifications). Only three of this
+    // endpoint's transitions notify anyone at all (task spec section 5:
+    // "Do NOT automatically convert every activity event into a
+    // notification" - the other reachable transition here,
+    // reopened->in_progress, is deliberately silent, same as 'closed'
+    // below):
+    //   in_progress (open/reopened -> in_progress): Employee only - "Work
+    //     started on your request" (task spec section 21: useful, and
+    //     only once, on the actual transition - this whole endpoint
+    //     already rejects a same-status no-op above with 400, so this
+    //     code can never run for a repeated/no-op status write). The actor
+    //     is always the assigned Operator (the only role
+    //     OPERATOR_TRANSITIONS ever allows into 'in_progress'), which can
+    //     never equal the Employee recipient.
+    //   resolved: Employee only - REQUIRED (task spec section 22). Actor
+    //     is always the assigned Operator. Manager notification on
+    //     resolve is deliberately NOT implemented (task spec: "optional;
+    //     implement only if the existing dashboard workflow benefits" -
+    //     the Manager Dashboard's own DOC-53 statistics already surface
+    //     resolved-request counts, so a Manager does not need a push-style
+    //     notification for every individual resolution too).
+    //   reopened: assigned Operator (REQUIRED, task spec section 23) AND
+    //     the Organization's Manager (task spec section 8: "good
+    //     candidate" - a request regressing after being marked resolved is
+    //     a meaningful organization-level event). The Employee who
+    //     performed this action is deliberately NOT notified about their
+    //     own reopen (task spec: "Do not notify the Employee about their
+    //     own action").
+    // 'closed' is deliberately silent here (and in managerCloseRequest
+    // below) - task spec section 24 asks this rule to be documented: by
+    // the time a Request reaches 'closed', both the Employee (who chose to
+    // close it, or already saw it resolved) and the Operator (who already
+    // received the resolved-time notification) already know the Request's
+    // lifecycle is complete: a further notification would be redundant
+    // noise, not new information.
+    if (nextStatus === 'in_progress') {
+      await createRequestNotification({
+        request: requestDoc,
+        recipientId: requestDoc.createdBy,
+        actorId: req.user.userId,
+        type: 'REQUEST_STATUS_CHANGED',
+        title: 'Work started on your request',
+        message: `Work has started on ${requestNotificationLabel(requestDoc)}.`,
+        metadata: { requestTitle: requestDoc.title, newStatus: nextStatus },
+      });
+    } else if (nextStatus === 'resolved') {
+      await createRequestNotification({
+        request: requestDoc,
+        recipientId: requestDoc.createdBy,
+        actorId: req.user.userId,
+        type: 'REQUEST_RESOLVED',
+        title: 'Your request was resolved',
+        message: `${requestNotificationLabel(requestDoc)} has been marked as Resolved. Review it and confirm or reopen if needed.`,
+        metadata: { requestTitle: requestDoc.title },
+      });
+    } else if (nextStatus === 'reopened') {
+      if (requestDoc.assignedOperatorId) {
+        await createRequestNotification({
+          request: requestDoc,
+          recipientId: requestDoc.assignedOperatorId,
+          actorId: req.user.userId,
+          type: 'REQUEST_REOPENED',
+          title: 'A request was reopened',
+          message: `${requestNotificationLabel(requestDoc)} was reopened by the Employee.`,
+          metadata: { requestTitle: requestDoc.title },
+        });
+      }
+      const manager = await findOrganizationManager(req.user.organizationId);
+      if (manager) {
+        await createRequestNotification({
+          request: requestDoc,
+          recipientId: manager._id,
+          actorId: req.user.userId,
+          type: 'REQUEST_REOPENED',
+          title: 'A request was reopened',
+          message: `${requestNotificationLabel(requestDoc)} was reopened after being marked resolved.`,
+          metadata: { requestTitle: requestDoc.title },
+        });
+      }
+    }
+
     // Same enrichment/response shape DOC-11 already established - no
     // separate response shape for a status-changed Request.
     const [category, assignedOperator] = await Promise.all([
@@ -1121,8 +1564,80 @@ const updateMyRequest = async (req, res, next) => {
       updates.categoryId = newCategory._id;
     }
 
+    // DOC-17 - captured BEFORE Object.assign overwrites requestDoc's own
+    // fields below, so every "did this actually change" comparison has a
+    // true original value to compare against - never re-derived after the
+    // fact.
+    const previousValues = {
+      title: requestDoc.title,
+      description: requestDoc.description,
+      priority: requestDoc.priority,
+      categoryId: requestDoc.categoryId,
+    };
+
     Object.assign(requestDoc, updates);
     await requestDoc.save();
+
+    // DOC-17 - up to three independent timeline events from this single
+    // call, each only ever recorded if that specific field's value
+    // actually changed (task spec section 12: "Only create the activity
+    // if the value actually changed... Do NOT create medium -> medium
+    // activities" - applied here to title/description/category too, for
+    // the same reason: resubmitting an unchanged field must not add noise
+    // to the timeline).
+    const fieldsChanged = [];
+    if (Object.prototype.hasOwnProperty.call(updates, 'title') && updates.title !== previousValues.title) {
+      fieldsChanged.push('title');
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, 'description') && updates.description !== previousValues.description) {
+      fieldsChanged.push('description');
+    }
+    if (fieldsChanged.length > 0) {
+      // Deliberately does NOT store the full previous/next text bodies
+      // (task spec section 14: "This prevents unnecessary duplication") -
+      // only WHICH fields changed.
+      await recordRequestActivity({
+        request: requestDoc,
+        actorId: req.user.userId,
+        type: 'REQUEST_UPDATED',
+        metadata: { fieldsChanged },
+      });
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'priority') && updates.priority !== previousValues.priority) {
+      await recordRequestActivity({
+        request: requestDoc,
+        actorId: req.user.userId,
+        type: 'PRIORITY_CHANGED',
+        oldValue: previousValues.priority,
+        newValue: updates.priority,
+      });
+    }
+
+    if (newCategory && String(newCategory._id) !== String(previousValues.categoryId)) {
+      // Old category name resolved for the timeline's own display
+      // purposes (task spec section 13: "Prefer displaying category names
+      // rather than raw ObjectIds") - NOT restricted to isActive, since
+      // the previous category may since have been deactivated; a
+      // since-deactivated category must still show its real historical
+      // name here, the same rule buildRequestEnrichmentMaps already
+      // documents for the Request's own category display.
+      const previousCategory = await ServiceCategory.findOne({
+        _id: previousValues.categoryId,
+        organizationId: req.user.organizationId,
+      });
+      await recordRequestActivity({
+        request: requestDoc,
+        actorId: req.user.userId,
+        type: 'CATEGORY_CHANGED',
+        oldValue: previousValues.categoryId,
+        newValue: newCategory._id,
+        metadata: {
+          oldCategoryName: previousCategory ? previousCategory.name : 'Unknown Category',
+          newCategoryName: newCategory.name,
+        },
+      });
+    }
 
     // DOC-46 never touches Comment documents - editing title/description/
     // category/priority has zero effect on any existing comment (task
@@ -1187,8 +1702,21 @@ const cancelMyRequest = async (req, res, next) => {
     }
 
     // Server decides the value entirely - never read from req.body.
+    const previousStatus = requestDoc.status;
     requestDoc.status = 'cancelled';
     await requestDoc.save();
+
+    // DOC-17 - this Employee-only cancel path never reads a `reason`
+    // (task spec: "a dedicated, deliberately body-less endpoint" - see
+    // this function's own top comment), so no `cancelReason` exists here
+    // to include in metadata, unlike managerCancelRequest below.
+    await recordRequestActivity({
+      request: requestDoc,
+      actorId: req.user.userId,
+      type: 'REQUEST_CANCELLED',
+      oldValue: previousStatus,
+      newValue: 'cancelled',
+    });
 
     const category = await ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId });
 
@@ -1299,6 +1827,22 @@ const addRequestAttachments = async (req, res, next) => {
       throw error;
     }
 
+    // DOC-17 - one event per upload ACTION (not one per file - task spec's
+    // own timeline example shows "Completion image uploaded" as a single
+    // line even though DOC-56 already allows multi-file uploads). Never
+    // stores raw image bytes, a GridFS id, an S3 objectKey, or a local
+    // filesystem path (task spec section 22) - only the safe, already-
+    // response-visible `attachmentId`/`originalName` pair per file.
+    await recordRequestActivity({
+      request: requestDoc,
+      actorId: req.user.userId,
+      type: 'BEFORE_IMAGE_ADDED',
+      metadata: {
+        count: newAttachments.length,
+        attachments: newAttachments.map((attachment) => ({ attachmentId: attachment._id, originalName: attachment.originalName })),
+      },
+    });
+
     const category = await ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId });
 
     return res.status(201).json({ status: 'success', data: sanitizeRequest(requestDoc, category, null) });
@@ -1353,6 +1897,13 @@ const removeRequestAttachment = async (req, res, next) => {
     // attachment - never a client-supplied identifier - so this can never
     // delete a file belonging to another Request.
     await deleteAttachmentStorage(removedAttachment);
+
+    await recordRequestActivity({
+      request: requestDoc,
+      actorId: req.user.userId,
+      type: 'BEFORE_IMAGE_REMOVED',
+      metadata: { attachmentId: removedAttachment._id, originalName: removedAttachment.originalName },
+    });
 
     const category = await ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId });
 
@@ -1486,6 +2037,16 @@ const addCompletionImages = async (req, res, next) => {
       throw error;
     }
 
+    await recordRequestActivity({
+      request: requestDoc,
+      actorId: req.user.userId,
+      type: 'COMPLETION_IMAGE_ADDED',
+      metadata: {
+        count: newAttachments.length,
+        attachments: newAttachments.map((attachment) => ({ attachmentId: attachment._id, originalName: attachment.originalName })),
+      },
+    });
+
     const [category, assignedOperator] = await Promise.all([
       ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId }),
       User.findOne({ _id: requestDoc.assignedOperatorId, organizationId: req.user.organizationId }),
@@ -1542,6 +2103,13 @@ const removeCompletionImage = async (req, res, next) => {
     // using only this already-authorized attachment's own stored
     // reference.
     await deleteAttachmentStorage(removedAttachment);
+
+    await recordRequestActivity({
+      request: requestDoc,
+      actorId: req.user.userId,
+      type: 'COMPLETION_IMAGE_REMOVED',
+      metadata: { attachmentId: removedAttachment._id, originalName: removedAttachment.originalName },
+    });
 
     const [category, assignedOperator] = await Promise.all([
       ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId }),
@@ -1692,15 +2260,254 @@ const getRequestAttachmentContent = async (req, res, next) => {
   }
 };
 
+// DOC-17 - "who may view this Request's activity timeline" - deliberately
+// re-expressed here (not imported from utils/commentAccess.js, and not
+// reused from canViewRequestImages above either) even though it matches
+// both of those exactly today: viewing a Request's comments, viewing its
+// images, and viewing its activity timeline are three conceptually
+// different permissions that happen to share identical rules right now -
+// keeping this as its own small, independent function means a FUTURE
+// change to any one of them never silently changes the other two (task
+// spec section 8: "Preserve current Request visibility rules" - Employee
+// own-Request-only, Operator assigned-Request-only, Manager any-Request-
+// in-Organization, System Admin never - "Do not create new operational
+// System Admin permissions").
+function canViewRequestActivities({
+  role, userId, requestCreatedBy, assignedOperatorId,
+}) {
+  if (role === 'employee') {
+    return String(requestCreatedBy) === String(userId);
+  }
+  if (role === 'operator') {
+    return !!assignedOperatorId && String(assignedOperatorId) === String(userId);
+  }
+  if (role === 'manager') {
+    return true;
+  }
+  return false;
+}
+
+// Every RequestActivity `type` whose stored oldValue/newValue are already
+// safe, display-ready scalars (a plain status/priority enum string) -
+// passed straight through to the response with no transformation at all.
+// Every OTHER type (CATEGORY_CHANGED, ASSIGNED, REASSIGNED, UNASSIGNED)
+// instead reads its display value out of `metadata` (a name snapshotted at
+// write time - see models/RequestActivity.js's own comment on why this
+// project resolves reference-typed display names once, at write time,
+// rather than re-resolving them live on every future read); every other
+// type (REQUEST_CREATED, REQUEST_UPDATED, image events) never has a
+// meaningful oldValue/newValue at all and always reports both as `null`.
+const SCALAR_ACTIVITY_TYPES = new Set([
+  'STATUS_CHANGED', 'PRIORITY_CHANGED', 'REQUEST_CANCELLED', 'REQUEST_REOPENED', 'REQUEST_CLOSED',
+]);
+
+// Builds the safe, frontend-ready `oldValue`/`newValue` pair for one
+// activity record - see this function's own inline comments per `type`.
+// Never returns a raw Mongo ObjectId to the client for a reference-typed
+// event (task spec section 26: never expose internal Mongo fields) - only
+// ever a display-ready string or `null`.
+function buildActivityDisplayValues(activity) {
+  if (SCALAR_ACTIVITY_TYPES.has(activity.type)) {
+    return { oldValue: activity.oldValue, newValue: activity.newValue };
+  }
+  const metadata = activity.metadata || {};
+  if (activity.type === 'CATEGORY_CHANGED') {
+    return { oldValue: metadata.oldCategoryName || null, newValue: metadata.newCategoryName || null };
+  }
+  if (activity.type === 'ASSIGNED') {
+    return { oldValue: null, newValue: metadata.newOperatorName || null };
+  }
+  if (activity.type === 'REASSIGNED') {
+    return { oldValue: metadata.previousOperatorName || null, newValue: metadata.newOperatorName || null };
+  }
+  if (activity.type === 'UNASSIGNED') {
+    return { oldValue: metadata.previousOperatorName || null, newValue: null };
+  }
+  // REQUEST_CREATED, REQUEST_UPDATED, and every image event - all of
+  // their meaningful information lives in `metadata`, never oldValue/
+  // newValue (see requestActivity.service.js's own per-type
+  // documentation).
+  return { oldValue: null, newValue: null };
+}
+
+const DEFAULT_ACTIVITY_PAGE_SIZE = 100;
+const MAX_ACTIVITY_PAGE_SIZE = 200;
+
+// GET /api/requests/:requestId/activities
+// (Employee/Operator/Manager - NOT System Admin)
+//
+// DOC-17 - "Request Activity Timeline". Returns this Request's own
+// chronological history, OLDEST FIRST (task spec section 25's own worked
+// example reads top-to-bottom, oldest event first - "Request created ->
+// Priority changed -> Assigned -> ..." - this endpoint's response order
+// matches that reading order exactly, so the frontend can render the
+// array directly with no client-side re-sorting).
+//
+// Reachable by Employee (own Request only), Operator (assigned Request
+// only), Manager (any Request in their Organization) - never System
+// Admin (task spec section 8: "System Admin should NOT gain day-to-day
+// operational Request access just because timeline exists" - rejected
+// first and unconditionally, before any Request lookup even runs, the
+// same convention getRequestAttachmentContent above already uses).
+//
+// PAGINATION (task spec section 25 - "avoid overengineering"): an
+// optional `limit` (1-200, default 100) caps how many events come back;
+// an optional `before` (an activity id already returned by a previous
+// call) fetches the next OLDER page - the same "id you already have as a
+// cursor" shape a `before`/`limit` pair is meant to express, without a
+// second opaque cursor-token format to invent or document. Internally
+// this queries newest-first (so `limit` naturally keeps the most RECENT
+// N events of whichever window `before` selects) and reverses the page
+// back to oldest-first immediately before returning it, so the response
+// contract is always "oldest -> newest", regardless of pagination.
+const getRequestActivities = async (req, res, next) => {
+  try {
+    if (req.user.role === 'system_admin') {
+      return res.status(403).json({ status: 'error', message: 'System Admin cannot access Request activity.' });
+    }
+
+    const { requestId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(requestId)) {
+      return res.status(400).json({ status: 'error', message: 'Invalid request id.' });
+    }
+
+    // Organization-scoped first - a nonexistent Request and one belonging
+    // to another Organization both produce the exact same 404 (DOC-38
+    // anti-enumeration convention, identical to every other Request
+    // lookup in this controller).
+    const requestDoc = await Request.findOne({ _id: requestId, organizationId: req.user.organizationId });
+    if (!requestDoc) {
+      return res.status(404).json({ status: 'error', message: 'Request not found.' });
+    }
+
+    const authorized = canViewRequestActivities({
+      role: req.user.role,
+      userId: req.user.userId,
+      requestCreatedBy: requestDoc.createdBy,
+      assignedOperatorId: requestDoc.assignedOperatorId,
+    });
+    if (!authorized) {
+      // Right Organization, wrong role/assignment - an honest 403, same
+      // shape as getRequestAttachmentContent's own identical case.
+      return res.status(403).json({ status: 'error', message: 'You are not authorized to view this request\'s activity.' });
+    }
+
+    let limit = DEFAULT_ACTIVITY_PAGE_SIZE;
+    if (req.query.limit !== undefined) {
+      const parsedLimit = Number.parseInt(req.query.limit, 10);
+      if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > MAX_ACTIVITY_PAGE_SIZE) {
+        return res.status(400).json({
+          status: 'error',
+          message: `limit must be an integer between 1 and ${MAX_ACTIVITY_PAGE_SIZE}.`,
+        });
+      }
+      limit = parsedLimit;
+    }
+
+    // `requestId`/`organizationId` scope this query exactly like every
+    // other Request-scoped lookup here - a client can never widen this
+    // beyond the one already-authorized Request by supplying any query
+    // parameter (task spec section 25: "Do not allow arbitrary
+    // organization filtering").
+    const activityQuery = { requestId: requestDoc._id, organizationId: req.user.organizationId };
+
+    if (req.query.before !== undefined) {
+      if (!mongoose.Types.ObjectId.isValid(req.query.before)) {
+        return res.status(400).json({ status: 'error', message: 'before must be a valid activity id.' });
+      }
+      // The cursor activity must itself belong to THIS Request - never
+      // trusted as a bare timestamp/offset supplied directly by the
+      // client, which could otherwise be used to probe for the existence/
+      // timing of another Request's activity.
+      const cursorActivity = await RequestActivity.findOne({
+        _id: req.query.before, requestId: requestDoc._id, organizationId: req.user.organizationId,
+      });
+      if (!cursorActivity) {
+        return res.status(400).json({ status: 'error', message: 'before does not reference a known activity on this request.' });
+      }
+      activityQuery.createdAt = { $lt: cursorActivity.createdAt };
+    }
+
+    const newestFirstPage = await RequestActivity
+      .find(activityQuery)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit);
+    const activityDocs = newestFirstPage.slice().reverse();
+
+    // Batch-resolve every distinct actor in this page in ONE query (never
+    // one query per activity - the same N+1-avoiding shape
+    // buildRequestEnrichmentMaps/buildCreatorMap already establish
+    // elsewhere in this controller). Scoped by organizationId as defense
+    // in depth, exactly like those. A deactivated actor is still found
+    // (isActive is never part of this query) and still displayed by real
+    // name - task spec section 6: "If the actor no longer exists or is
+    // inactive, historical activity must still remain readable." Only an
+    // actor that cannot be found AT ALL (hypothetical - this project never
+    // hard-deletes a User) falls back to "Unknown user".
+    const actorIds = Array.from(new Set(activityDocs.map((activity) => String(activity.actorId))));
+    const actors = actorIds.length > 0
+      ? await User.find({ _id: { $in: actorIds }, organizationId: req.user.organizationId })
+      : [];
+    const actorMap = new Map(actors.map((actor) => [String(actor._id), actor]));
+
+    const data = activityDocs.map((activity) => {
+      const actor = actorMap.get(String(activity.actorId));
+      const { oldValue, newValue } = buildActivityDisplayValues(activity);
+      return {
+        id: activity._id,
+        type: activity.type,
+        actor: actor
+          ? { id: actor._id, fullName: actor.fullName, role: actor.role }
+          : { id: activity.actorId, fullName: 'Unknown user', role: null },
+        oldValue,
+        newValue,
+        // `metadata` is passed straight through - task spec's own response
+        // shape includes it verbatim. Every value ever placed into it by
+        // requestActivity.service.js's callers is already safe by
+        // construction (attachment id/originalName, category/operator
+        // display names, fieldsChanged, cancelReason - see each call
+        // site's own comment) - never a GridFS id, S3 objectKey, local
+        // filesystem path, password, or JWT.
+        metadata: activity.metadata || {},
+        createdAt: activity.createdAt,
+      };
+    });
+
+    return res.status(200).json({ status: 'success', data });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 // PATCH /api/requests/:id/assign (manager only)
 //
 // DOC-52 - "Manager assigns Request to a suitable Operator", the one
 // missing piece that makes the rest of the Operator workflow reachable at
-// all. Body: `{ operatorId }` - the only field ever read; nothing else in
-// the body (status, organizationId, createdBy, ...) has any effect
-// (explicit single-field read, not an allowlist-filtered spread, the same
-// "smallest possible mass-assignment surface" shape updateUserRole
-// already uses in user.controller.js).
+// all. DOC-15 - "Advanced Request History & Reassignment" - extended this
+// SAME endpoint (task spec section 15: "Prefer extending the current
+// endpoint rather than creating unnecessary new overlapping endpoints")
+// rather than adding a second one, and gave it the exact body shape the
+// task spec itself describes: `{ operatorId, reason }`.
+//   - `operatorId` a valid Operator id -> ASSIGN (if currently unassigned)
+//     or REASSIGN (if replacing a DIFFERENT operator).
+//   - `operatorId` explicit `null` -> UNASSIGN (removes the current
+//     assignment) - this is NEW in DOC-15; the pre-DOC-15 version of this
+//     endpoint only ever accepted a real operator id and had no
+//     unassignment capability at all (a Manager had to use the separate
+//     PATCH /:id/manager endpoint's own assignedOperatorId: null branch
+//     for that - see managerUpdateRequest below, which keeps working
+//     completely unchanged).
+//   - `operatorId` absent entirely -> 400 (this field must always be
+//     present, either as a real id or explicit null - task spec section
+//     16: the caller states its own intent via `operatorId`, never a
+//     separate "which operation is this" flag).
+// `reason` is read ONLY when it actually matters (reassignment/
+// unassignment) - a first assignment never even looks at it (task spec
+// section 5). The backend alone decides ASSIGNED vs REASSIGNED vs
+// UNASSIGNED from the Request's OWN current `assignedOperatorId` compared
+// against the requested `operatorId` - task spec section 15's own
+// explicit rule: "Do not trust frontend to tell backend which operation
+// this is."
 //
 // Order of checks (mirrors the state-eligibility-before-field-validation
 // order updateMyRequest/cancelMyRequest already established in DOC-46):
@@ -1709,23 +2516,32 @@ const getRequestAttachmentContent = async (req, res, next) => {
 //      since the Manager is never the creator (404 if not found; a
 //      nonexistent Request and one belonging to another Organization are
 //      indistinguishable, DOC-38 anti-enumeration convention)
-//   3. status === 'open' (409 otherwise) - task spec section 5:
-//      in_progress/resolved/closed/cancelled are all rejected the same
-//      way, whether this is a first assignment or a reassignment
-//      ("allow replacing Operator only while still open")
-//   4. operatorId present and a well-formed ObjectId (400)
-//   5. Operator lookup, scoped by organizationId AND role: 'operator' AND
-//      isActive: true AND specialties containing this Request's own
-//      categoryId, all in ONE query (400, one generic message, if it
-//      resolves to nothing - task spec section 15: cross-organization,
-//      wrong-role [employee/manager/system_admin], inactive, and
-//      wrong-specialty are all indistinguishable via this single query
-//      result, the same anti-enumeration shape createRequest already uses
-//      for an invalid categoryId)
-//   6. Sprint 4 (DOC-22) - reassigning the SAME Operator this Request is
-//      already assigned to is rejected as a no-op (400), not silently
-//      re-saved. A Manager genuinely replacing the Operator with a
-//      DIFFERENT one is unaffected by this check.
+//   3. status === 'open' (409 otherwise) - task spec section 7: this
+//      project's existing architecture already restricts assignment/
+//      reassignment/unassignment to 'open' Requests only (see the DOC-15
+//      audit notes in this ticket's final report) - DOC-15 preserves this
+//      exactly, it does not invent a new transition or extend eligibility
+//      to in_progress/resolved/closed/cancelled.
+//   4. operatorId present (400 if the key itself is missing from the body)
+//   5. Operator lookup (when operatorId is a real id), scoped by
+//      organizationId AND role: 'operator' AND isActive: true AND
+//      specialties containing this Request's own categoryId, all in ONE
+//      query (400, one generic message, if it resolves to nothing - task
+//      spec section 15/8: cross-organization, wrong-role [employee/
+//      manager/system_admin], inactive, and wrong-specialty are all
+//      indistinguishable via this single query result, the same
+//      anti-enumeration shape createRequest already uses for an invalid
+//      categoryId)
+//   6. Sprint 4 (DOC-22, preserved unchanged by DOC-15) - reassigning the
+//      SAME Operator this Request is already assigned to is rejected as a
+//      no-op (400), not silently re-saved, and never reaches reason
+//      validation, activity recording, or notifications at all (task spec
+//      section 6). A Manager genuinely replacing the Operator with a
+//      DIFFERENT one, or removing the current one, is unaffected by this
+//      check.
+//   7. DOC-15 - reason required ONLY for a genuine reassignment/
+//      unassignment (400, generic validation message, never a raw
+//      Mongoose/Mongo error - task spec section 3).
 //
 // On success, only `assignedOperatorId` is written - "nothing else
 // changes" (task spec section 6). Status is deliberately NOT touched here
@@ -1754,12 +2570,97 @@ const assignRequestOperator = async (req, res, next) => {
     if (requestDoc.status !== 'open') {
       return res.status(409).json({
         status: 'error',
-        message: 'Only an open request can be assigned or reassigned to an operator.',
+        message: 'Only an open request can be assigned, reassigned, or unassigned.',
       });
     }
 
     const body = req.body || {};
+    if (!Object.prototype.hasOwnProperty.call(body, 'operatorId')) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'operatorId is required - a valid operator id to assign/reassign, or null to unassign.',
+      });
+    }
     const { operatorId } = body;
+
+    // DOC-17 - captured up front, before any write - by this point the
+    // no-op "same operator" case has not yet been rejected, so this value
+    // alone is not yet enough to classify ASSIGNED vs REASSIGNED; it is
+    // re-checked against the resolved operator/null branch below.
+    const previousOperatorId = requestDoc.assignedOperatorId;
+
+    // DOC-15 - "Advanced Request History & Reassignment": explicit `null`
+    // (the key IS present, its value IS null) means UNASSIGN. This is
+    // deliberately the same convention managerUpdateRequest's own
+    // assignedOperatorId field already uses - not a second, differently-
+    // spelled convention.
+    if (operatorId === null) {
+      if (!previousOperatorId) {
+        return res.status(400).json({ status: 'error', message: 'This request has no assigned operator to remove.' });
+      }
+
+      const reasonError = validateAssignmentReason(body.reason);
+      if (reasonError) {
+        return res.status(400).json({ status: 'error', message: reasonError });
+      }
+      const reason = body.reason.trim();
+
+      // Resolved BEFORE the write, exactly like every other "previous
+      // operator" lookup in this controller - snapshotted into metadata at
+      // write time so a later name change/deactivation never rewrites this
+      // historical event's display.
+      const previousOperator = await User.findOne({ _id: previousOperatorId, organizationId: req.user.organizationId });
+
+      requestDoc.assignedOperatorId = null;
+      await requestDoc.save();
+
+      // DOC-17 - task spec section 9's preferred UNASSIGNED metadata
+      // shape: `{previousOperatorId, previousOperatorName, reason}`.
+      await recordRequestActivity({
+        request: requestDoc,
+        actorId: req.user.userId,
+        type: 'UNASSIGNED',
+        oldValue: previousOperatorId,
+        newValue: null,
+        metadata: {
+          previousOperatorId,
+          previousOperatorName: previousOperator ? previousOperator.fullName : 'Unknown Operator',
+          reason,
+        },
+      });
+
+      // DOC-18 - identical recipient rules to managerUpdateRequest's own
+      // UNASSIGNED branch: Employee + the removed Operator, never every
+      // Operator in the Organization. Task spec section 11 - the reason is
+      // deliberately NOT included in notification text by default (see
+      // this function's own top comment / the final report's documented
+      // decision) - it remains primarily an internal Request-history
+      // field, visible via the Timeline (DOC-17), not pushed into a
+      // notification message.
+      await createRequestNotification({
+        request: requestDoc,
+        recipientId: requestDoc.createdBy,
+        actorId: req.user.userId,
+        type: 'REQUEST_UNASSIGNED',
+        title: 'Your request was unassigned',
+        message: `${requestNotificationLabel(requestDoc)} no longer has an assigned operator.`,
+        metadata: { requestTitle: requestDoc.title },
+      });
+      if (previousOperator) {
+        await createRequestNotification({
+          request: requestDoc,
+          recipientId: previousOperator._id,
+          actorId: req.user.userId,
+          type: 'REQUEST_UNASSIGNED',
+          title: 'You were removed from a request',
+          message: `You were removed from ${requestNotificationLabel(requestDoc)}.`,
+          metadata: { requestTitle: requestDoc.title },
+        });
+      }
+
+      const category = await ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId });
+      return res.status(200).json({ status: 'success', data: sanitizeRequest(requestDoc, category, null) });
+    }
 
     if (typeof operatorId !== 'string' || !mongoose.Types.ObjectId.isValid(operatorId)) {
       return res.status(400).json({ status: 'error', message: 'A valid operatorId is required.' });
@@ -1788,16 +2689,32 @@ const assignRequestOperator = async (req, res, next) => {
       });
     }
 
-    // Sprint 4 (DOC-22) - "reassigning the same Operator" is a no-op, not a
-    // meaningful state change. Rejected explicitly (400) rather than
-    // silently re-saving the identical value, the same "no-op is its own
-    // kind of rejection" pattern DOC-12's updateRequestStatus already uses
-    // for `requestDoc.status === nextStatus`.
-    if (requestDoc.assignedOperatorId && String(requestDoc.assignedOperatorId) === String(operator._id)) {
+    // Sprint 4 (DOC-22, preserved unchanged) - "reassigning the same
+    // Operator" is a no-op, not a meaningful state change. Rejected
+    // explicitly (400) rather than silently re-saving the identical value,
+    // the same "no-op is its own kind of rejection" pattern DOC-12's
+    // updateRequestStatus already uses for `requestDoc.status ===
+    // nextStatus`. DOC-15 task spec section 6 - never reaches reason
+    // validation, RequestActivity, or Notification creation; `updatedAt`
+    // is never touched (the document is never saved on this path).
+    if (previousOperatorId && String(previousOperatorId) === String(operator._id)) {
       return res.status(400).json({
         status: 'error',
         message: 'This request is already assigned to this operator.',
       });
+    }
+
+    // DOC-15 - reason required ONLY for a genuine REASSIGNMENT (replacing
+    // a DIFFERENT operator) - task spec section 5's explicit carve-out
+    // means a first assignment (previousOperatorId falsy) never validates
+    // or reads `reason` at all, even if the client sent one.
+    let reason = null;
+    if (previousOperatorId) {
+      const reasonError = validateAssignmentReason(body.reason);
+      if (reasonError) {
+        return res.status(400).json({ status: 'error', message: reasonError });
+      }
+      reason = body.reason.trim();
     }
 
     // Nothing else changes (task spec section 6) - status, title,
@@ -1805,6 +2722,89 @@ const assignRequestOperator = async (req, res, next) => {
     // are left exactly as they were.
     requestDoc.assignedOperatorId = operator._id;
     await requestDoc.save();
+
+    // Display name of the PREVIOUS operator, only resolved when this is a
+    // genuine reassignment (previousOperatorId truthy) - snapshotted into
+    // metadata at write time, exactly like `newOperatorName` below, so a
+    // later name change or deactivation never rewrites this historical
+    // event's display (see models/RequestActivity.js's own comment on why
+    // oldValue/newValue for reference-typed events are resolved once,
+    // here, rather than re-resolved live on every future read).
+    const previousOperatorName = previousOperatorId
+      ? (await User.findOne({ _id: previousOperatorId, organizationId: req.user.organizationId }))?.fullName || 'Unknown Operator'
+      : null;
+
+    // DOC-17 - DOC-15 extends this event's metadata with the task spec's
+    // own preferred REASSIGNED shape (`previousOperatorId`,
+    // `previousOperatorName`, `newOperatorId`, `newOperatorName`,
+    // `reason`) - ASSIGNED (a genuine first assignment, no previous
+    // operator, no reason) keeps the smaller, previously-established
+    // `{newOperatorId, newOperatorName}` shape; there is no previous
+    // operator or reason to record for it.
+    await recordRequestActivity({
+      request: requestDoc,
+      actorId: req.user.userId,
+      type: previousOperatorId ? 'REASSIGNED' : 'ASSIGNED',
+      oldValue: previousOperatorId,
+      newValue: operator._id,
+      metadata: previousOperatorId
+        ? {
+          previousOperatorId,
+          previousOperatorName,
+          newOperatorId: operator._id,
+          newOperatorName: operator.fullName,
+          reason,
+        }
+        : { newOperatorId: operator._id, newOperatorName: operator.fullName },
+    });
+
+    // DOC-18 - "In-App Notifications". Task spec sections 18-19: the
+    // Employee and the newly-assigned Operator are ALWAYS notified (first
+    // assignment or reassignment alike); the previous Operator is notified
+    // ONLY on a genuine reassignment (previousOperatorId truthy). The
+    // Manager who performed this action never receives a self-notification
+    // - `createNotification`'s own actor-exclusion check would already
+    // skip it even without this, but the Manager is also structurally
+    // never one of these three recipients (Employee/previous Operator/new
+    // Operator) in the first place. Unrelated Operators are never notified
+    // - only the two operator ids actually involved in this transition are
+    // ever a recipient here. DOC-15 task spec section 11 - the
+    // reassignment reason is deliberately NOT included in any of these
+    // three notification messages by default (documented decision, final
+    // report) - it is primarily internal Request-history, fully visible
+    // via the Timeline (DOC-17) to anyone authorized to view this Request.
+    const notificationType = previousOperatorId ? 'REQUEST_REASSIGNED' : 'REQUEST_ASSIGNED';
+    await createRequestNotification({
+      request: requestDoc,
+      recipientId: requestDoc.createdBy,
+      actorId: req.user.userId,
+      type: notificationType,
+      title: previousOperatorId ? 'Your request was reassigned' : 'Your request was assigned',
+      message: previousOperatorId
+        ? `${requestNotificationLabel(requestDoc)} was reassigned to ${operator.fullName}.`
+        : `${requestNotificationLabel(requestDoc)} was assigned to ${operator.fullName}.`,
+      metadata: { requestTitle: requestDoc.title, operatorName: operator.fullName },
+    });
+    await createRequestNotification({
+      request: requestDoc,
+      recipientId: operator._id,
+      actorId: req.user.userId,
+      type: notificationType,
+      title: 'A request was assigned to you',
+      message: `${requestNotificationLabel(requestDoc)} was assigned to you.`,
+      metadata: { requestTitle: requestDoc.title },
+    });
+    if (previousOperatorId) {
+      await createRequestNotification({
+        request: requestDoc,
+        recipientId: previousOperatorId,
+        actorId: req.user.userId,
+        type: notificationType,
+        title: 'You were removed from a request',
+        message: `You were removed from ${requestNotificationLabel(requestDoc)}.`,
+        metadata: { requestTitle: requestDoc.title },
+      });
+    }
 
     const category = await ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId });
 
@@ -1852,6 +2852,18 @@ const MANAGER_EDIT_TERMINAL_STATUSES = ['closed', 'cancelled'];
 //     (if replacing a different Operator) - status must be 'open'.
 //   - explicit JSON `null`: remove the current assignment - status must
 //     be 'open', and there must actually BE an assignment to remove.
+// DOC-15 - "Advanced Request History & Reassignment" - added one more
+// optional top-level body field, `reason`, read ONLY when
+// `assignedOperatorId` represents a genuine reassignment (replacing a
+// DIFFERENT operator) or unassignment (explicit `null` with a real
+// existing assignment) - required in both of those cases, never read or
+// validated for a first assignment (task spec section 5), and never read
+// at all when `assignedOperatorId` is absent from the body. This keeps
+// this endpoint's reason requirement in exact parity with
+// assignRequestOperator's own DOC-15 extension (PATCH /:id/assign) - a
+// Manager reassigning/unassigning through EITHER of this project's two
+// existing assignment-capable endpoints is held to the identical rule,
+// so neither one is a way to bypass the other's audit-trail requirement.
 // Every field-level rule below is validated BEFORE anything is written -
 // a request that mixes one valid and one invalid field is rejected
 // entirely, with no partial write, the same all-or-nothing shape
@@ -1928,6 +2940,11 @@ const managerUpdateRequest = async (req, res, next) => {
     const effectiveCategoryId = resolvedCategory ? resolvedCategory._id : requestDoc.categoryId;
 
     let resolvedOperator; // undefined = "don't touch assignedOperatorId"; null = "remove"; a User doc = "assign/reassign"
+    // DOC-15 - only ever set (non-null) when this specific call is a
+    // genuine reassignment/unassignment - a first assignment through this
+    // endpoint never validates or reads `reason` either, the exact same
+    // carve-out assignRequestOperator's own extension applies.
+    let resolvedReason = null;
     if (hasAssignedOperatorId) {
       if (body.assignedOperatorId === null) {
         if (requestDoc.status !== 'open') {
@@ -1939,6 +2956,16 @@ const managerUpdateRequest = async (req, res, next) => {
         if (!requestDoc.assignedOperatorId) {
           return res.status(400).json({ status: 'error', message: 'This request has no assigned operator to remove.' });
         }
+        // DOC-15 - unassignment always requires a reason (task spec
+        // section 4), validated with the exact same rules/message shape
+        // assignRequestOperator's own extension uses - one shared
+        // validator (validateAssignmentReason), never two copies of the
+        // same rule.
+        const reasonError = validateAssignmentReason(body.reason);
+        if (reasonError) {
+          return res.status(400).json({ status: 'error', message: reasonError });
+        }
+        resolvedReason = body.reason.trim();
         resolvedOperator = null;
       } else {
         if (typeof body.assignedOperatorId !== 'string' || !mongoose.Types.ObjectId.isValid(body.assignedOperatorId)) {
@@ -1972,9 +2999,28 @@ const managerUpdateRequest = async (req, res, next) => {
             message: 'This request is already assigned to this operator.',
           });
         }
+        // DOC-15 - reason required ONLY when this is a genuine
+        // reassignment (an assignment already exists and is being
+        // replaced) - never for a first assignment (task spec section 5).
+        if (requestDoc.assignedOperatorId) {
+          const reasonError = validateAssignmentReason(body.reason);
+          if (reasonError) {
+            return res.status(400).json({ status: 'error', message: reasonError });
+          }
+          resolvedReason = body.reason.trim();
+        }
         resolvedOperator = operator;
       }
     }
+
+    // DOC-17 - captured BEFORE any of the three writes below, so each
+    // "did this actually change" comparison (and REASSIGNED vs
+    // ASSIGNED/UNASSIGNED classification) has a true original value.
+    const previousValues = {
+      priority: requestDoc.priority,
+      categoryId: requestDoc.categoryId,
+      assignedOperatorId: requestDoc.assignedOperatorId,
+    };
 
     if (hasPriority) {
       requestDoc.priority = body.priority;
@@ -2005,6 +3051,162 @@ const managerUpdateRequest = async (req, res, next) => {
     }
 
     await requestDoc.save();
+
+    // DOC-17 - up to three independent timeline events from this single
+    // combined-edit call, each only recorded if that specific field's
+    // value actually changed (task spec section 12's "only if actually
+    // changed" principle, applied uniformly here too).
+    if (hasPriority && body.priority !== previousValues.priority) {
+      await recordRequestActivity({
+        request: requestDoc,
+        actorId: req.user.userId,
+        type: 'PRIORITY_CHANGED',
+        oldValue: previousValues.priority,
+        newValue: body.priority,
+      });
+    }
+
+    if (resolvedCategory && String(resolvedCategory._id) !== String(previousValues.categoryId)) {
+      // Old category name resolved for display, exactly like
+      // updateMyRequest's own CATEGORY_CHANGED handling above - not
+      // restricted to isActive, since the previous category may since
+      // have been deactivated.
+      const previousCategory = await ServiceCategory.findOne({
+        _id: previousValues.categoryId,
+        organizationId: req.user.organizationId,
+      });
+      await recordRequestActivity({
+        request: requestDoc,
+        actorId: req.user.userId,
+        type: 'CATEGORY_CHANGED',
+        oldValue: previousValues.categoryId,
+        newValue: resolvedCategory._id,
+        metadata: {
+          oldCategoryName: previousCategory ? previousCategory.name : 'Unknown Category',
+          newCategoryName: resolvedCategory.name,
+        },
+      });
+    }
+
+    if (hasAssignedOperatorId) {
+      if (resolvedOperator === null) {
+        // DOC-17 section 17 - UNASSIGNED. Only ever reachable here when
+        // `previousValues.assignedOperatorId` was truthy (this function's
+        // own earlier validation already rejects removing a nonexistent
+        // assignment with a 400), so a previous-operator lookup for
+        // display always resolves a real, previously-assigned Operator.
+        const previousOperator = await User.findOne({
+          _id: previousValues.assignedOperatorId,
+          organizationId: req.user.organizationId,
+        });
+        // DOC-15 - task spec section 9's preferred UNASSIGNED metadata
+        // shape: `{previousOperatorId, previousOperatorName, reason}` -
+        // `resolvedReason` was already validated (required, non-empty,
+        // <=500 chars) above, before this Request was even saved.
+        await recordRequestActivity({
+          request: requestDoc,
+          actorId: req.user.userId,
+          type: 'UNASSIGNED',
+          oldValue: previousValues.assignedOperatorId,
+          newValue: null,
+          metadata: {
+            previousOperatorId: previousValues.assignedOperatorId,
+            previousOperatorName: previousOperator ? previousOperator.fullName : 'Unknown Operator',
+            reason: resolvedReason,
+          },
+        });
+        // DOC-18 - task spec section 20: Employee + the removed Operator,
+        // never every Operator in the Organization.
+        await createRequestNotification({
+          request: requestDoc,
+          recipientId: requestDoc.createdBy,
+          actorId: req.user.userId,
+          type: 'REQUEST_UNASSIGNED',
+          title: 'Your request was unassigned',
+          message: `${requestNotificationLabel(requestDoc)} no longer has an assigned operator.`,
+          metadata: { requestTitle: requestDoc.title },
+        });
+        if (previousOperator) {
+          await createRequestNotification({
+            request: requestDoc,
+            recipientId: previousOperator._id,
+            actorId: req.user.userId,
+            type: 'REQUEST_UNASSIGNED',
+            title: 'You were removed from a request',
+            message: `You were removed from ${requestNotificationLabel(requestDoc)}.`,
+            metadata: { requestTitle: requestDoc.title },
+          });
+        }
+      } else if (resolvedOperator) {
+        // Display name of the PREVIOUS operator, resolved only for a
+        // genuine reassignment - same snapshot-at-write-time rationale as
+        // assignRequestOperator's own identical lookup.
+        const previousOperatorName = previousValues.assignedOperatorId
+          ? (await User.findOne({ _id: previousValues.assignedOperatorId, organizationId: req.user.organizationId }))?.fullName || 'Unknown Operator'
+          : null;
+        // DOC-15 - see assignRequestOperator's own identical comment: task
+        // spec section 9's preferred REASSIGNED metadata shape
+        // (`previousOperatorId`, `previousOperatorName`, `newOperatorId`,
+        // `newOperatorName`, `reason`) for a genuine reassignment; the
+        // smaller, previously-established `{newOperatorId, newOperatorName}`
+        // shape for a genuine first ASSIGNED (no previous operator, no
+        // reason to record).
+        await recordRequestActivity({
+          request: requestDoc,
+          actorId: req.user.userId,
+          type: previousValues.assignedOperatorId ? 'REASSIGNED' : 'ASSIGNED',
+          oldValue: previousValues.assignedOperatorId,
+          newValue: resolvedOperator._id,
+          metadata: previousValues.assignedOperatorId
+            ? {
+              previousOperatorId: previousValues.assignedOperatorId,
+              previousOperatorName,
+              newOperatorId: resolvedOperator._id,
+              newOperatorName: resolvedOperator.fullName,
+              reason: resolvedReason,
+            }
+            : { newOperatorId: resolvedOperator._id, newOperatorName: resolvedOperator.fullName },
+        });
+        // DOC-18 - identical recipient rules to assignRequestOperator's own
+        // ASSIGNED/REASSIGNED notifications above (this endpoint reaches
+        // the exact same underlying business transition through a
+        // different route - the combined Manager edit form).
+        {
+          const managerNotificationType = previousValues.assignedOperatorId ? 'REQUEST_REASSIGNED' : 'REQUEST_ASSIGNED';
+          await createRequestNotification({
+            request: requestDoc,
+            recipientId: requestDoc.createdBy,
+            actorId: req.user.userId,
+            type: managerNotificationType,
+            title: previousValues.assignedOperatorId ? 'Your request was reassigned' : 'Your request was assigned',
+            message: previousValues.assignedOperatorId
+              ? `${requestNotificationLabel(requestDoc)} was reassigned to ${resolvedOperator.fullName}.`
+              : `${requestNotificationLabel(requestDoc)} was assigned to ${resolvedOperator.fullName}.`,
+            metadata: { requestTitle: requestDoc.title, operatorName: resolvedOperator.fullName },
+          });
+          await createRequestNotification({
+            request: requestDoc,
+            recipientId: resolvedOperator._id,
+            actorId: req.user.userId,
+            type: managerNotificationType,
+            title: 'A request was assigned to you',
+            message: `${requestNotificationLabel(requestDoc)} was assigned to you.`,
+            metadata: { requestTitle: requestDoc.title },
+          });
+          if (previousValues.assignedOperatorId) {
+            await createRequestNotification({
+              request: requestDoc,
+              recipientId: previousValues.assignedOperatorId,
+              actorId: req.user.userId,
+              type: managerNotificationType,
+              title: 'You were removed from a request',
+              message: `You were removed from ${requestNotificationLabel(requestDoc)}.`,
+              metadata: { requestTitle: requestDoc.title },
+            });
+          }
+        }
+      }
+    }
 
     const [category, assignedOperator] = await Promise.all([
       ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId }),
@@ -2068,11 +3270,54 @@ const managerCancelRequest = async (req, res, next) => {
     // timestamp are never read from req.body (task spec: never trust
     // client-supplied ownership fields). Only the reason's TEXT comes from
     // the caller.
+    const previousStatus = requestDoc.status;
     requestDoc.status = 'cancelled';
     requestDoc.cancelledBy = req.user.userId;
     requestDoc.cancelledAt = new Date();
     requestDoc.cancelReason = body.reason.trim();
     await requestDoc.save();
+
+    // DOC-17 section 19 - `cancelReason` is safe to include here: it is
+    // already a normal, non-sensitive part of this exact same Request's
+    // own response shape (sanitizeRequest's `cancelReason` field, visible
+    // to the same audience that can already view this Request at all), so
+    // repeating it in the timeline exposes nothing new.
+    await recordRequestActivity({
+      request: requestDoc,
+      actorId: req.user.userId,
+      type: 'REQUEST_CANCELLED',
+      oldValue: previousStatus,
+      newValue: 'cancelled',
+      metadata: { cancelReason: requestDoc.cancelReason },
+    });
+
+    // DOC-18 - task spec section 25: Employee always notified; the
+    // assigned Operator too, if one exists at the moment of cancellation.
+    // `cancelReason` is included in the notification metadata for the
+    // same reason DOC-17's own identical comment above already gives -
+    // both recipients can already see this exact same field on this exact
+    // same Request's own response shape (sanitizeRequest), so repeating it
+    // here exposes nothing new to either of them.
+    await createRequestNotification({
+      request: requestDoc,
+      recipientId: requestDoc.createdBy,
+      actorId: req.user.userId,
+      type: 'REQUEST_CANCELLED',
+      title: 'Your request was cancelled',
+      message: `${requestNotificationLabel(requestDoc)} was cancelled by the Manager.`,
+      metadata: { requestTitle: requestDoc.title, cancelReason: requestDoc.cancelReason },
+    });
+    if (requestDoc.assignedOperatorId) {
+      await createRequestNotification({
+        request: requestDoc,
+        recipientId: requestDoc.assignedOperatorId,
+        actorId: req.user.userId,
+        type: 'REQUEST_CANCELLED',
+        title: 'A request was cancelled',
+        message: `${requestNotificationLabel(requestDoc)} was cancelled by the Manager.`,
+        metadata: { requestTitle: requestDoc.title, cancelReason: requestDoc.cancelReason },
+      });
+    }
 
     const [category, assignedOperator, cancelledByUser] = await Promise.all([
       ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId }),
@@ -2134,6 +3379,7 @@ const managerCloseRequest = async (req, res, next) => {
       });
     }
 
+    const previousStatus = requestDoc.status;
     requestDoc.status = 'closed';
     // DOC-55 - same "set once" rule updateRequestStatus's own 'closed'
     // branch uses; resolvedAt is never touched here, so it is preserved
@@ -2142,6 +3388,19 @@ const managerCloseRequest = async (req, res, next) => {
       requestDoc.closedAt = new Date();
     }
     await requestDoc.save();
+
+    // DOC-17 - the same REQUEST_CLOSED type updateRequestStatus's own
+    // 'closed' branch uses, so "closed via the generic status endpoint"
+    // and "closed via this dedicated Manager endpoint" are indistinguishable
+    // in the timeline - both are simply "the Request was closed" (task
+    // spec section 18's "one meaningful event per user action" convention).
+    await recordRequestActivity({
+      request: requestDoc,
+      actorId: req.user.userId,
+      type: 'REQUEST_CLOSED',
+      oldValue: previousStatus,
+      newValue: 'closed',
+    });
 
     const [category, assignedOperator] = await Promise.all([
       ServiceCategory.findOne({ _id: requestDoc.categoryId, organizationId: req.user.organizationId }),
@@ -2334,6 +3593,7 @@ module.exports = {
   listMyRequests,
   getMyRequestById,
   listOrganizationRequests,
+  exportOrganizationRequestsCsv,
   listAssignedRequests,
   updateRequestStatus,
   assignRequestOperator,
@@ -2344,6 +3604,7 @@ module.exports = {
   addCompletionImages,
   removeCompletionImage,
   getRequestAttachmentContent,
+  getRequestActivities,
   managerUpdateRequest,
   managerCancelRequest,
   managerCloseRequest,
@@ -2351,4 +3612,8 @@ module.exports = {
   getAssignedRequestStatistics,
   getOrganizationRequestStatistics,
   sanitizeRequest,
+  // DOC-16 - exported for the same reason sanitizeRequest already is: a
+  // small, pure, easily unit-testable function with no controller-specific
+  // req/res/next dependency of its own.
+  requestNotificationLabel,
 };

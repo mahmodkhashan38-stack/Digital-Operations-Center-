@@ -233,6 +233,58 @@ completionAttachmentSchema.pre('validate', ensureStorageReference);
 
 const requestSchema = new mongoose.Schema(
   {
+    // DOC-16 - "Request Number / Human-Friendly ID". The stable, human-
+    // facing identifier (`REQ-000123`) - see
+    // services/requestNumber.service.js for the exact format/generation
+    // logic and models/Counter.js for the atomic sequence it comes from.
+    // MongoDB's own `_id` remains the ONLY internal database identifier
+    // everywhere (foreign keys - RequestActivity.requestId,
+    // Notification.requestId, Comment's own request reference, image
+    // storage object keys - all continue to reference `_id`, never
+    // `requestNumber`, and this task does not change any of them).
+    //
+    // COMPATIBILITY POLICY (same documented pattern `slaDueAt`/
+    // `slaPolicyHours` above already established for DOC-55): deliberately
+    // NOT `required: true` here, even though `createRequest` always
+    // generates and sets it for every NEW Request going forward.
+    // Mongoose's `required` validator only runs when a document is
+    // actually saved, never retroactively against documents already
+    // persisted before this field existed - every Request created before
+    // DOC-16 therefore simply has no `requestNumber` at all (`undefined`)
+    // and remains perfectly readable, exactly like a pre-DOC-55 Request's
+    // missing `slaDueAt`. It is never rejected, migrated, or patched
+    // automatically by anything at server startup - only the OPTIONAL,
+    // explicit `npm run migrate:request-numbers` script
+    // (scripts/migrateRequestNumbers.js) ever backfills it.
+    //
+    // `unique: true` + `sparse: true` together are what make this safe
+    // for historical documents: a sparse unique index only enforces
+    // uniqueness among documents where the field actually EXISTS - any
+    // number of historical Requests missing `requestNumber` entirely can
+    // coexist without ever colliding with each other or with a real,
+    // assigned value (a plain, non-sparse unique index would instead
+    // reject every Request after the very first one with no
+    // `requestNumber`, since MongoDB indexes a missing field as `null`
+    // and a non-sparse unique index allows at most one `null`).
+    //
+    // `immutable: true` (task spec section 3: "immutable after creation")
+    // - Mongoose enforces this itself: once a document has a real,
+    // non-null `requestNumber`, any later `.save()` that tries to change
+    // it is silently reverted back to the original value by Mongoose
+    // BEFORE validation even runs. No controller anywhere in this project
+    // ever attempts to write to this field after creation (there is no
+    // "edit requestNumber" endpoint, and updateMyRequest's own
+    // FORBIDDEN_EDIT_FIELDS-style allowlist construction never reads it
+    // from req.body either), so this is defense in depth, not the only
+    // protection.
+    requestNumber: {
+      type: String,
+      unique: true,
+      sparse: true,
+      immutable: true,
+      trim: true,
+      default: null,
+    },
     title: {
       type: String,
       required: true,

@@ -9,6 +9,8 @@
     "migrate:request-sla": "node scripts/migrateRequestSla.js",
     "migrate:request-images-to-gridfs": "node scripts/migrateRequestImagesToGridFs.js",
     "migrate:request-images-to-s3": "node scripts/migrateRequestImagesToS3.js",
+    "backfill:request-activity": "node scripts/backfillRequestActivity.js",
+    "migrate:request-numbers": "node scripts/migrateRequestNumbers.js",
     "seed:system-admin": "node scripts/seedSystemAdmin.js"
   },
   "dependencies": {

@@ -19,3 +19,20 @@ export const DASHBOARD_ROUTE_BY_ROLE = {
 // It should only ever be reached defensively: every role in the schema's
 // enum has an explicit mapping above.
 export const destinationForRole = (role) => DASHBOARD_ROUTE_BY_ROLE[role] || '/';
+
+// DOC-62 - "User Profile" (task spec section 8: "Display role in
+// human-readable form"). Single shared source for the four role labels -
+// OrganizationChat.jsx already has its own local, incomplete
+// ROLE_LABELS (no 'system_admin' entry, since System Admin can never
+// reach that page) which is left as-is rather than refactored here (out
+// of scope for this ticket, and that one is deliberately incomplete for a
+// good reason specific to Chat). This one is complete (all four roles),
+// since Profile must render a label for every role that can view it.
+export const ROLE_LABELS = {
+  system_admin: 'System Admin',
+  manager: 'Manager',
+  operator: 'Operator',
+  employee: 'Employee',
+};
+
+export const roleLabel = (role) => ROLE_LABELS[role] || role || 'Unknown';

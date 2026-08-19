@@ -10,7 +10,9 @@ import AdminDashboard from './pages/AdminDashboard.jsx';
 import ManagerDashboard from './pages/ManagerDashboard.jsx';
 import OperatorDashboard from './pages/OperatorDashboard.jsx';
 import ChangePassword from './pages/ChangePassword.jsx';
+import Profile from './pages/Profile.jsx';
 import OrganizationChat from './pages/OrganizationChat.jsx';
+import NotFound from './pages/NotFound.jsx';
 
 // Root application component. Wires up authentication state, the navigation
 // bar, and page routes (including the protected dashboard).
@@ -34,6 +36,22 @@ function App() {
               element={
                 <ProtectedRoute>
                   <ChangePassword />
+                </ProtectedRoute>
+              }
+            />
+            {/* DOC-62 - "User Profile". Reachable by ANY authenticated role
+                (no `roles` restriction, same shape as /change-password
+                above) - the page itself derives everything it shows from
+                the caller's own token context. A user with
+                mustChangePassword === true is still redirected to
+                /change-password by ProtectedRoute's existing check below
+                the roles check, unchanged - they never see this page's
+                content until that flag clears. */}
+            <Route
+              path="/profile"
+              element={
+                <ProtectedRoute>
+                  <Profile />
                 </ProtectedRoute>
               }
             />
@@ -106,6 +124,15 @@ function App() {
                 </ProtectedRoute>
               }
             />
+            {/* DOC-69 - "Error & UX Hardening" (task spec section 35). Catch-all
+                for any URL that matches none of the routes above (a typo, a
+                stale bookmark, a copy-pasted link with extra path segments).
+                Always the LAST route - React Router only reaches this when
+                nothing earlier matched. Unauthenticated on purpose (no
+                ProtectedRoute wrapper): a person is not signed in yet at the
+                point they've mistyped a URL, and NotFound.jsx itself already
+                reads auth state to decide its own "go back" destination. */}
+            <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
       </div>

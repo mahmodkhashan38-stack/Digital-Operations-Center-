@@ -9,6 +9,11 @@ const userRoutes = require('./routes/user.routes');
 const serviceCategoryRoutes = require('./routes/serviceCategory.routes');
 const requestRoutes = require('./routes/request.routes');
 const chatRoutes = require('./routes/chat.routes');
+const notificationRoutes = require('./routes/notification.routes');
+// DOC-64 - "Audit Log" - a separate, administrative-only collection, never
+// mounted under /api/requests or merged with DOC-17's RequestActivity -
+// see models/AuditLog.js's own top comment for the full distinction.
+const auditLogRoutes = require('./routes/auditLog.routes');
 const notFound = require('./middleware/notFound');
 const errorHandler = require('./middleware/errorHandler');
 const { UPLOAD_ROOT } = require('./middleware/upload');
@@ -134,6 +139,15 @@ app.use('/api/requests', requestRoutes);
 // comment for why this is a genuinely separate collection/route, not a
 // reuse of DOC-13's Request Comments system).
 app.use('/api/chat', chatRoutes);
+// DOC-18 - "In-App Notifications" - a separate, per-recipient inbox, never
+// mounted under /api/requests (a notification is about a Request but is
+// not itself Request-scoped data the way DOC-17's Timeline is - see
+// models/Notification.js's own top comment for the full distinction).
+app.use('/api/notifications', notificationRoutes);
+// DOC-64 - "Audit Log" - Manager (own Organization) / System Admin
+// (platform-wide) read access only; see routes/auditLog.routes.js for the
+// full authorization chain.
+app.use('/api/audit-logs', auditLogRoutes);
 
 // DOC-45 - controlled static serving of uploaded Request image
 // attachments, mounted under the same /api namespace as everything else

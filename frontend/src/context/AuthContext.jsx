@@ -1,8 +1,19 @@
 import { createContext, useContext, useEffect, useState } from 'react';
-import { authApi } from '../services/api';
+import { authApi, setUnauthorizedHandler } from '../services/api';
 
 const AuthContext = createContext(null);
 const TOKEN_STORAGE_KEY = 'doc_auth_token';
+// DOC-69 - "Error & UX Hardening" (task spec section 14). Set right before
+// clearing auth state whenever services/api.js detects a session-invalid/
+// deactivated response mid-session (see that file's own
+// SESSION_INVALID_MESSAGES comment) - Login.jsx reads and immediately
+// clears this once, so the person understands WHY they landed back on
+// Login instead of just silently losing their place. A plain
+// sessionStorage flag (not React state) on purpose: the redirect itself
+// is a full route change (ProtectedRoute reacting to isAuthenticated
+// becoming false), so this needs to survive that navigation without
+// threading a new prop/context value through it.
+export const SESSION_EXPIRED_FLAG_KEY = 'doc_session_expired';
 
 // Provides authentication state (user, token) and actions (login, register,
 // logout) to the whole application. Persists the session via localStorage so
@@ -52,6 +63,27 @@ export function AuthProvider({ children }) {
     setToken(null);
     setUser(null);
   };
+
+  // DOC-69 - registers the ONE handler services/api.js calls when it
+  // detects a session-invalid/deactivated response on an authenticated
+  // call made mid-session (see that file's own top comment). Sets the
+  // one-time "why am I back on Login" flag, then reuses `logout()`
+  // completely unchanged - `isAuthenticated` becoming false is what makes
+  // ProtectedRoute.jsx redirect to /login on its own (no separate
+  // navigate() call needed here, and no risk of an infinite redirect loop:
+  // this only ever runs in reaction to a REJECTED API call, never in
+  // reaction to the redirect itself, which makes no API call of its own).
+  // Registered once per AuthProvider mount (there is exactly one, for the
+  // lifetime of this app - see main.jsx), never re-registered on every
+  // render.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      sessionStorage.setItem(SESSION_EXPIRED_FLAG_KEY, '1');
+      logout();
+    });
+    return () => setUnauthorizedHandler(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // DOC-57 - lets a page that just received a fresh, real sanitized user
   // object back from the backend (e.g. the Change Password page's own

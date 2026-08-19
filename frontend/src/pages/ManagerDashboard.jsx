@@ -10,16 +10,66 @@ import ServiceCategoryRow from '../components/ServiceCategoryRow.jsx';
 import ManagerRequestRow from '../components/ManagerRequestRow.jsx';
 import RequestSearchControls from '../components/RequestSearchControls.jsx';
 import StatBreakdownList from '../components/StatBreakdownList.jsx';
+import AuditLogPanel from '../components/AuditLogPanel.jsx';
+// DOC-69 - PRIORITY_LABELS/STATUS_LABELS now imported from
+// utils/requestLabels.js (one centralized mapping shared with
+// RequestRow.jsx/ManagerRequestRow.jsx/RequestStatusBadge.jsx) instead of
+// being redeclared here.
+import { PRIORITY_LABELS, STATUS_LABELS } from '../utils/requestLabels.js';
+import getApiErrorMessage from '../utils/apiError.js';
+import { EMAIL_REGEX } from '../utils/validation.js';
 
-const PRIORITY_LABELS = { high: 'High', medium: 'Medium', low: 'Low' };
-const STATUS_LABELS = {
-  open: 'Open',
-  in_progress: 'In Progress',
-  resolved: 'Resolved',
-  closed: 'Closed',
-  reopened: 'Reopened',
-  cancelled: 'Cancelled',
-};
+// DOC-61 - "Organization Settings for Manager". Client-side-only, fast-
+// feedback validation mirroring backend/src/controllers/
+// organization.controller.js's own validateName/validateDescription/
+// validateContactEmail/validateContactPhone bounds exactly - the backend
+// remains the sole authority and re-validates independently regardless
+// (this project's consistent pattern - see Register.jsx/ChangePassword.jsx
+// for the same "client validates for UX, server validates for real" split).
+const ORG_NAME_MIN_LENGTH = 2;
+const ORG_NAME_MAX_LENGTH = 100;
+const ORG_DESCRIPTION_MAX_LENGTH = 1000;
+const ORG_CONTACT_PHONE_MAX_LENGTH = 30;
+// Deliberately permissive (task spec section 19) - mirrors the backend's
+// own CONTACT_PHONE_PATTERN exactly: digits, `+`, spaces, parentheses,
+// hyphens, with at least one digit required.
+const CONTACT_PHONE_PATTERN = /^[0-9+\-()\s]+$/;
+
+function validateOrgSettingsForm(form) {
+  const errors = {};
+
+  const trimmedName = form.name.trim();
+  if (!trimmedName) {
+    errors.name = 'Organization name is required.';
+  } else if (trimmedName.length < ORG_NAME_MIN_LENGTH || trimmedName.length > ORG_NAME_MAX_LENGTH) {
+    errors.name = `Organization name must be between ${ORG_NAME_MIN_LENGTH} and ${ORG_NAME_MAX_LENGTH} characters.`;
+  }
+
+  if (form.description.trim().length > ORG_DESCRIPTION_MAX_LENGTH) {
+    errors.description = `Description must be at most ${ORG_DESCRIPTION_MAX_LENGTH} characters.`;
+  }
+
+  const trimmedEmail = form.contactEmail.trim();
+  if (trimmedEmail && !EMAIL_REGEX.test(trimmedEmail)) {
+    errors.contactEmail = 'Please provide a valid contact email address.';
+  }
+
+  const trimmedPhone = form.contactPhone.trim();
+  if (trimmedPhone) {
+    if (trimmedPhone.length > ORG_CONTACT_PHONE_MAX_LENGTH) {
+      errors.contactPhone = `Contact phone must be at most ${ORG_CONTACT_PHONE_MAX_LENGTH} characters.`;
+    } else if (!CONTACT_PHONE_PATTERN.test(trimmedPhone) || !/\d/.test(trimmedPhone)) {
+      errors.contactPhone = 'Please provide a valid contact phone number.';
+    }
+  }
+
+  return errors;
+}
+
+function formatOrgCreatedDate(value) {
+  if (!value) return '-';
+  return new Date(value).toLocaleDateString();
+}
 
 // DOC-55 - "Request SLA and Due Dates" stat-card formatting helpers.
 // `null` (never `0`) means "nothing eligible yet" (task spec: "If no
@@ -163,6 +213,104 @@ function ManagerDashboard() {
   useEffect(() => {
     loadOrganization();
   }, [loadOrganization]);
+
+  // --- Organization Settings (DOC-61) -------------------------------------
+  // A separate, EDITABLE form layered on top of the same `organization`
+  // state above (task spec section 13: "Prefer integrating with the
+  // existing Manager Dashboard architecture rather than introducing
+  // unnecessary routing.") - this is the same "Organization Information"
+  // panel DOC-42 already built, now also editable, not a second page/route
+  // or a second fetch. `settingsForm` starts `null` (not yet initialized
+  // from a real load) and is (re)populated every time `organization`
+  // itself changes - both the initial load AND right after a successful
+  // save (whose response replaces `organization` below), so the form
+  // always reflects the backend's own confirmed current values, never a
+  // locally-guessed one.
+  const [settingsForm, setSettingsForm] = useState(null);
+  const [settingsErrors, setSettingsErrors] = useState({});
+  const [settingsServerError, setSettingsServerError] = useState('');
+  const [settingsSuccess, setSettingsSuccess] = useState('');
+  const [settingsPending, setSettingsPending] = useState(false);
+
+  useEffect(() => {
+    if (organization) {
+      setSettingsForm({
+        name: organization.name || '',
+        description: organization.description || '',
+        contactEmail: organization.contactEmail || '',
+        contactPhone: organization.contactPhone || '',
+      });
+    }
+  }, [organization]);
+
+  const handleSettingsChange = (event) => {
+    const { name, value } = event.target;
+    setSettingsForm((prev) => ({ ...prev, [name]: value }));
+    // Task spec section 8/16 - a stale success banner or a field's own
+    // error clears itself the moment the Manager starts correcting it,
+    // rather than lingering next to a freshly-edited value.
+    setSettingsSuccess('');
+    setSettingsErrors((prev) => (prev[name] ? { ...prev, [name]: undefined } : prev));
+  };
+
+  // Task spec section 15 - "Track whether form values actually changed.
+  // Disable Save if nothing changed where practical." Compared against
+  // `organization`'s own last-confirmed values (never against some other
+  // local snapshot that could itself go stale).
+  const hasSettingsChanges = useMemo(() => {
+    if (!organization || !settingsForm) return false;
+    return (
+      settingsForm.name.trim() !== (organization.name || '')
+      || settingsForm.description.trim() !== (organization.description || '')
+      || settingsForm.contactEmail.trim() !== (organization.contactEmail || '')
+      || settingsForm.contactPhone.trim() !== (organization.contactPhone || '')
+    );
+  }, [organization, settingsForm]);
+
+  const handleSaveSettings = async (event) => {
+    event.preventDefault();
+    // Task spec section 14 - "Do not double-submit." / section 15 -
+    // "Disable Save if nothing changed" - both re-checked here (not only
+    // via the button's own `disabled` attribute), the same defense-in-
+    // depth this project's other forms already apply.
+    if (settingsPending || !organization || !settingsForm || !hasSettingsChanges) {
+      return;
+    }
+
+    setSettingsServerError('');
+    setSettingsSuccess('');
+
+    const validationErrors = validateOrgSettingsForm(settingsForm);
+    setSettingsErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
+      return;
+    }
+
+    // Task spec section 27 test 16 - "partial update succeeds": only the
+    // fields that actually changed are ever sent, never the full form -
+    // the backend's own PATCH /organizations/me already supports (and
+    // expects) a partial body.
+    const updates = {};
+    if (settingsForm.name.trim() !== (organization.name || '')) updates.name = settingsForm.name.trim();
+    if (settingsForm.description.trim() !== (organization.description || '')) updates.description = settingsForm.description.trim();
+    if (settingsForm.contactEmail.trim() !== (organization.contactEmail || '')) updates.contactEmail = settingsForm.contactEmail.trim();
+    if (settingsForm.contactPhone.trim() !== (organization.contactPhone || '')) updates.contactPhone = settingsForm.contactPhone.trim();
+
+    setSettingsPending(true);
+    try {
+      const response = await organizationApi.updateMine(updates, token);
+      // Task spec section 15 - "update local UI immediately... Do not
+      // require full page reload." The backend's own response (never a
+      // locally-guessed object) replaces `organization`, which in turn
+      // re-syncs `settingsForm` via the effect above.
+      setOrganization(response.data);
+      setSettingsSuccess('Organization settings updated successfully.');
+    } catch (error) {
+      setSettingsServerError(getApiErrorMessage(error, 'Unable to update organization settings. Please try again.'));
+    } finally {
+      setSettingsPending(false);
+    }
+  };
 
   // --- Employees / Operators (DOC-35/36) ----------------------------------
   const [users, setUsers] = useState(null); // null = not loaded yet
@@ -421,6 +569,50 @@ function ManagerDashboard() {
     setRequestFilters(DEFAULT_REQUEST_FILTERS);
   };
 
+  // --- DOC-67 - "Request Reports & CSV Export" -----------------------------
+  // Manager-only (this button/handler exists only on ManagerDashboard.jsx -
+  // task spec section 17: "Do not add it to Employee or Operator
+  // dashboard."). Always sends the CURRENT `requestFilters` state - the
+  // exact same filters currently driving the visible table above (task
+  // spec section 18) - never an unfiltered pull; a Manager who has not
+  // touched any filter simply exports the full Organization list, which is
+  // the correct behavior for `DEFAULT_REQUEST_FILTERS`, not a special case.
+  const [exportPending, setExportPending] = useState(false);
+  const [exportError, setExportError] = useState('');
+
+  const handleExportCsv = async () => {
+    if (exportPending) return; // task spec section 20: no accidental repeated export requests.
+    setExportPending(true);
+    setExportError('');
+    try {
+      const { blob, filename } = await requestApi.exportOrganizationCsv(token, requestFilters);
+      // JWT-AUTHENTICATED BLOB DOWNLOAD (task spec section 19): the file
+      // never has a real URL of its own - `URL.createObjectURL` mints a
+      // short-lived, this-tab-only `blob:` URL purely so a normal
+      // programmatic `<a download>` click can trigger the browser's save
+      // flow; it is revoked immediately after, so it can never be reused,
+      // shared, or leak the CSV's bytes past this one click.
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      // DOC-69 - `exportOrganizationCsv` (services/api.js) deliberately
+      // bypasses the shared `request()` helper for its success path (a
+      // Blob response, not JSON) - `getApiErrorMessage` is the extra,
+      // defensive safety net on its failure path specifically because of
+      // that bypass (see utils/apiError.js's own comment on why this
+      // helper exists at all).
+      setExportError(getApiErrorMessage(error, 'CSV export failed. Please try again.'));
+    } finally {
+      setExportPending(false);
+    }
+  };
+
   // Task spec section 2: only Operators who (a) belong to this same
   // Organization, (b) are currently active, and (c) list the Request's
   // own category among their specialties are ever offered - this is a UI
@@ -442,8 +634,12 @@ function ManagerDashboard() {
   // owns its own pending/error UI (ManagerRequestRow), this page owns the
   // token/network access and the real refetch afterward, the same split
   // every other Request action in this project already uses.
-  const handleAssignOperator = async (targetRequest, operatorId) => {
-    const response = await requestApi.assignOperator(targetRequest.id, operatorId, token);
+  // DOC-15 - `reason` is a new, optional third argument (undefined for a
+  // first assignment, where the row never even shows a reason field) -
+  // threaded straight through to the backend, which is the sole authority
+  // on when it is actually required.
+  const handleAssignOperator = async (targetRequest, operatorId, reason) => {
+    const response = await requestApi.assignOperator(targetRequest.id, operatorId, reason, token);
     setRequests((prev) => (prev || []).map((r) => (r.id === targetRequest.id ? response.data : r)));
     // DOC-53: assignment changes `totals.unassigned` and the Operator
     // Workload breakdown (task spec: refresh after "assign/reassign/
@@ -523,15 +719,22 @@ function ManagerDashboard() {
           subtitle={`Signed in as ${user?.fullName || user?.email} - manage Employees and Operators in your Organization.`}
         />
 
-        {/* --- Organization Information (DOC-42) -------------------------
-            Name/Company Code/Status come exclusively from GET
-            /api/organizations/me, which the backend derives from
-            req.user.organizationId - this page never sends an
-            organizationId to choose which Organization to retrieve. The
-            Company Code is shown because the Manager is the one who hands
-            it to employees who need to register. */}
+        {/* --- Organization Settings (DOC-61, formerly the DOC-42
+            "Organization Information" read-only panel) ---------------------
+            Loaded exclusively via GET /api/organizations/me and saved via
+            PATCH /api/organizations/me, both of which the backend derives
+            from req.user.organizationId - this page never sends an
+            organizationId to pick which Organization to view/edit, so a
+            Manager can only ever see/change their OWN Organization no
+            matter what is put in the request. Name/Description/Contact
+            Email/Contact Phone are editable; Company Code/Status/Created
+            remain read-only display fields (task spec sections 4-7) - the
+            Company Code in particular is shown (never an editable input)
+            because the Manager is the one who hands it to employees who
+            need to register, but only System Admin can ever regenerate
+            it. */}
         <div className="card admin-panel org-info-panel">
-          <h2>Organization Information</h2>
+          <h2>Organization Settings</h2>
           {organization === null && !orgError && (
             <p className="auth-subtitle">Loading organization information...</p>
           )}
@@ -543,21 +746,96 @@ function ManagerDashboard() {
               </button>
             </>
           )}
-          {organization && !orgError && (
-            <div className="org-info-details">
-              <div className="org-card-detail">
-                <span className="stat-label">Organization Name</span>
-                <span className="stat-value">{organization.name}</span>
+          {organization && !orgError && settingsForm && (
+            <form className="org-settings-form" onSubmit={handleSaveSettings} noValidate>
+              <div className="form-group">
+                <label htmlFor="org-settings-name">Organization Name</label>
+                <input
+                  id="org-settings-name"
+                  name="name"
+                  type="text"
+                  value={settingsForm.name}
+                  onChange={handleSettingsChange}
+                  disabled={settingsPending}
+                  maxLength={ORG_NAME_MAX_LENGTH}
+                />
+                {settingsErrors.name && <p className="form-error">{settingsErrors.name}</p>}
               </div>
-              <div className="org-card-detail">
-                <span className="stat-label">Company Code</span>
-                <span className="stat-value org-code">{organization.companyCode}</span>
+
+              <div className="form-group">
+                <label htmlFor="org-settings-description">Description</label>
+                <textarea
+                  id="org-settings-description"
+                  name="description"
+                  value={settingsForm.description}
+                  onChange={handleSettingsChange}
+                  disabled={settingsPending}
+                  maxLength={ORG_DESCRIPTION_MAX_LENGTH}
+                  rows={3}
+                  placeholder="Optional - a short description of your organization."
+                />
+                {settingsErrors.description && <p className="form-error">{settingsErrors.description}</p>}
               </div>
-              <div className="org-card-detail">
-                <span className="stat-label">Status</span>
-                <StatusBadge isActive={organization.isActive} />
+
+              <div className="form-group">
+                <label htmlFor="org-settings-contact-email">Contact Email</label>
+                <input
+                  id="org-settings-contact-email"
+                  name="contactEmail"
+                  type="email"
+                  value={settingsForm.contactEmail}
+                  onChange={handleSettingsChange}
+                  disabled={settingsPending}
+                  placeholder="Optional - a general contact email for your organization."
+                />
+                {settingsErrors.contactEmail && <p className="form-error">{settingsErrors.contactEmail}</p>}
               </div>
-            </div>
+
+              <div className="form-group">
+                <label htmlFor="org-settings-contact-phone">Contact Phone</label>
+                <input
+                  id="org-settings-contact-phone"
+                  name="contactPhone"
+                  type="text"
+                  value={settingsForm.contactPhone}
+                  onChange={handleSettingsChange}
+                  disabled={settingsPending}
+                  maxLength={ORG_CONTACT_PHONE_MAX_LENGTH}
+                  placeholder="Optional - a general contact phone number."
+                />
+                {settingsErrors.contactPhone && <p className="form-error">{settingsErrors.contactPhone}</p>}
+              </div>
+
+              {/* Read-only fields - never rendered as inputs, so there is no
+                  way for the Manager to even attempt to edit them from this
+                  form; Company Code regeneration and Status (de)activation
+                  both remain exclusively System-Admin actions elsewhere. */}
+              <div className="org-info-details">
+                <div className="org-card-detail">
+                  <span className="stat-label">Company Code</span>
+                  <span className="stat-value org-code">{organization.companyCode}</span>
+                </div>
+                <div className="org-card-detail">
+                  <span className="stat-label">Organization Status</span>
+                  <StatusBadge isActive={organization.isActive} />
+                </div>
+                <div className="org-card-detail">
+                  <span className="stat-label">Created</span>
+                  <span className="stat-value">{formatOrgCreatedDate(organization.createdAt)}</span>
+                </div>
+              </div>
+
+              {settingsServerError && <p className="form-error form-error-server">{settingsServerError}</p>}
+              {settingsSuccess && <p className="form-success">{settingsSuccess}</p>}
+
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={settingsPending || !hasSettingsChanges}
+              >
+                {settingsPending ? 'Saving...' : 'Save Changes'}
+              </button>
+            </form>
           )}
         </div>
 
@@ -795,7 +1073,24 @@ function ManagerDashboard() {
             section 5) - the backend independently enforces the same rule. */}
         <div className="admin-section-header">
           <h2>Organization Requests</h2>
+          {/* DOC-67 - "Export CSV" lives in this section's own header,
+              next to the Search/Filters/Sort controls right below it
+              (task spec section 17), never inside RequestSearchControls
+              itself (that component is shared by all three dashboards -
+              task spec: Employee/Operator must never see this button). */}
+          <button
+            type="button"
+            className="btn btn-outline"
+            onClick={handleExportCsv}
+            disabled={exportPending}
+          >
+            {exportPending ? 'Exporting...' : 'Export CSV'}
+          </button>
         </div>
+
+        {exportError && (
+          <p className="form-error form-error-server">{exportError}</p>
+        )}
 
         {/* DOC-54 - search/filter/sort controls, always shown (even while
             loading/erroring) so the Manager never loses their in-progress
@@ -934,6 +1229,12 @@ function ManagerDashboard() {
             )}
           </>
         )}
+
+        {/* DOC-64 - "Audit Log". Manager-only, own Organization - the
+            backend (routes/auditLog.routes.js) is the real boundary; this
+            component never fetches or shows anything beyond what that
+            endpoint itself returns for this Manager's token. */}
+        <AuditLogPanel isSystemAdmin={false} />
       </div>
     </section>
   );

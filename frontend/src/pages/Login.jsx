@@ -1,7 +1,23 @@
 import { useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext.jsx';
+import { useAuth, SESSION_EXPIRED_FLAG_KEY } from '../context/AuthContext.jsx';
 import { destinationForRole } from '../utils/roleRoutes.js';
+import getApiErrorMessage from '../utils/apiError.js';
+
+// DOC-69 - "Error & UX Hardening" (task spec section 14: "user sees a
+// meaningful message if practical"). Reads AuthContext's one-time flag
+// (set by services/api.js's unauthorized handler right before it clears
+// stale auth state and redirects here via ProtectedRoute) and clears it
+// immediately - a plain function, not a Hook, so it only ever runs once
+// per actual page load, during this module's first render, never on a
+// later re-render of the same mounted Login instance.
+function readAndClearSessionExpiredFlag() {
+  const wasSet = sessionStorage.getItem(SESSION_EXPIRED_FLAG_KEY) === '1';
+  if (wasSet) {
+    sessionStorage.removeItem(SESSION_EXPIRED_FLAG_KEY);
+  }
+  return wasSet;
+}
 
 // Login page. Submits credentials to the backend, stores the JWT on
 // success, and redirects the user to the dashboard.
@@ -30,6 +46,10 @@ function Login() {
   const [errors, setErrors] = useState({});
   const [serverError, setServerError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Lazy initializer - runs exactly once, on this component's first
+  // render, so a later re-render (e.g. while `isSubmitting` toggles)
+  // never re-reads/re-clears the flag a second time.
+  const [showSessionExpired] = useState(readAndClearSessionExpiredFlag);
 
   if (!isLoading && isAuthenticated) {
     return <Navigate to={postLoginDestination(user)} replace />;
@@ -70,7 +90,12 @@ function Login() {
       // middleware is what actually blocks every normal route afterward.
       navigate(postLoginDestination(loggedInUser));
     } catch (error) {
-      setServerError(error.message);
+      // DOC-69 - the extra `getApiErrorMessage` safety net specifically on
+      // this page (the very first screen an unauthenticated/offline
+      // visitor can hit) rather than everywhere - see utils/apiError.js's
+      // own comment for why most of this project's existing
+      // `error.message` displays don't need it.
+      setServerError(getApiErrorMessage(error, 'Login failed. Please try again.'));
     } finally {
       setIsSubmitting(false);
     }
@@ -82,6 +107,9 @@ function Login() {
         <h1>Login</h1>
         <p className="auth-subtitle">Sign in to access your Digital Operations Center account.</p>
 
+        {showSessionExpired && !serverError && (
+          <p className="form-error form-error-server">Your session has expired. Please sign in again.</p>
+        )}
         {serverError && <p className="form-error form-error-server">{serverError}</p>}
 
         <form className="auth-form" onSubmit={handleSubmit} noValidate>

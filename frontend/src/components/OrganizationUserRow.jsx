@@ -306,9 +306,12 @@ function OrganizationUserRow({
               >
                 Keep Active
               </button>
+              {/* DOC-69 - `.btn-danger`, for visual consistency with every
+                  other destructive confirm action in this project (task
+                  spec section 16). */}
               <button
                 type="button"
-                className="btn btn-primary"
+                className="btn btn-danger"
                 disabled={statusPending}
                 onClick={() => handleToggleStatusClick(false)}
               >

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { EMAIL_REGEX } from '../utils/validation.js';
+import getApiErrorMessage from '../utils/apiError.js';
 
 // Mirrors the backend's Company Code format (DOC-41): 6 letters/digits.
 // This is just a fast, friendly client-side check for obviously wrong
@@ -95,7 +96,9 @@ function Register() {
       });
       navigate('/login');
     } catch (error) {
-      setServerError(error.message);
+      // DOC-69 - same defensive safety net as Login.jsx - see
+      // utils/apiError.js's own comment.
+      setServerError(getApiErrorMessage(error, 'Registration failed. Please try again.'));
     } finally {
       setIsSubmitting(false);
     }

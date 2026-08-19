@@ -5,6 +5,7 @@ import CreateOrganizationForm from '../components/CreateOrganizationForm.jsx';
 import OrganizationCard from '../components/OrganizationCard.jsx';
 import DashboardHeader from '../components/DashboardHeader.jsx';
 import StatCard from '../components/StatCard.jsx';
+import AuditLogPanel from '../components/AuditLogPanel.jsx';
 
 // System Admin's dedicated, GLOBAL dashboard (DOC-37). System Admin does
 // not belong to an Organization (organizationId is always null - DOC-31),
@@ -265,6 +266,14 @@ function AdminDashboard() {
             ))}
           </div>
         )}
+
+        {/* DOC-64 - "Audit Log". System Admin sees platform-wide
+            administrative activity across every Organization, with an
+            Organization filter/column - never Request operational data
+            (task spec section 32: "Do not give System Admin Request
+            operational access through this UI" - this panel only ever
+            calls GET /api/audit-logs, never any Request endpoint). */}
+        <AuditLogPanel isSystemAdmin />
       </div>
     </section>
   );

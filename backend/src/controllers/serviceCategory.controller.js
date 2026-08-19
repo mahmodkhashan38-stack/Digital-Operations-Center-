@@ -1,6 +1,11 @@
 const mongoose = require('mongoose');
 const ServiceCategory = require('../models/ServiceCategory');
 const { ensureDefaultServiceCategories } = require('../utils/defaultServiceCategories');
+// DOC-64 - "Audit Log". Create/rename/activate/deactivate all record one
+// AuditLog entry AFTER their own business write already succeeded - see
+// services/auditLog.service.js's own top comment for the full failure-
+// strategy/sanitization contract.
+const { recordAuditLog } = require('../services/auditLog.service');
 
 const MIN_NAME_LENGTH = 2;
 const MAX_NAME_LENGTH = 60;
@@ -72,6 +77,15 @@ const createServiceCategory = async (req, res, next) => {
     const category = await ServiceCategory.create({
       name: name.trim(),
       organizationId: req.user.organizationId,
+    });
+
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: req.user.organizationId,
+      action: 'SERVICE_CATEGORY_CREATED',
+      targetType: 'ServiceCategory',
+      targetId: category._id,
+      metadata: { categoryName: category.name },
     });
 
     return res.status(201).json({ status: 'success', data: sanitizeServiceCategory(category) });
@@ -189,8 +203,21 @@ const updateServiceCategory = async (req, res, next) => {
       return res.status(404).json({ status: 'error', message: 'Service category not found.' });
     }
 
+    const previousName = category.name;
     category.name = body.name.trim();
     await category.save();
+
+    if (previousName !== category.name) {
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: req.user.organizationId,
+        action: 'SERVICE_CATEGORY_UPDATED',
+        targetType: 'ServiceCategory',
+        targetId: category._id,
+        changes: { name: { from: previousName, to: category.name } },
+        metadata: { categoryName: category.name },
+      });
+    }
 
     return res.status(200).json({ status: 'success', data: sanitizeServiceCategory(category) });
   } catch (error) {
@@ -229,8 +256,21 @@ const updateServiceCategoryStatus = async (req, res, next) => {
       return res.status(404).json({ status: 'error', message: 'Service category not found.' });
     }
 
+    const previousIsActive = category.isActive;
     category.isActive = body.isActive;
     await category.save();
+
+    if (previousIsActive !== category.isActive) {
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: req.user.organizationId,
+        action: category.isActive ? 'SERVICE_CATEGORY_ACTIVATED' : 'SERVICE_CATEGORY_DEACTIVATED',
+        targetType: 'ServiceCategory',
+        targetId: category._id,
+        changes: { isActive: { from: previousIsActive, to: category.isActive } },
+        metadata: { categoryName: category.name },
+      });
+    }
 
     return res.status(200).json({ status: 'success', data: sanitizeServiceCategory(category) });
   } catch (error) {
@@ -257,6 +297,25 @@ const updateServiceCategoryStatus = async (req, res, next) => {
 const createDefaultServiceCategories = async (req, res, next) => {
   try {
     const { createdCount, categories } = await ensureDefaultServiceCategories(req.user.organizationId);
+
+    // DOC-64 - one event for the whole recovery action (task spec section
+    // 13: "Prefer one meaningful audit event per administrative action"),
+    // not one per Category created - only recorded when this actually
+    // created something (idempotent no-op runs, where every default
+    // already existed, produce no audit noise). `targetId` uses the
+    // Organization itself (there is no single Category this action is
+    // "about") - the created categories' names are listed in `metadata`.
+    if (createdCount > 0) {
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: req.user.organizationId,
+        action: 'SERVICE_CATEGORY_CREATED',
+        targetType: 'Organization',
+        targetId: req.user.organizationId,
+        metadata: { createdCount, categoryNames: categories.map((category) => category.name) },
+      });
+    }
+
     return res.status(200).json({
       status: 'success',
       data: categories.map(sanitizeServiceCategory),
