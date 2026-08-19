@@ -9,6 +9,7 @@ const {
   listMyRequests,
   getMyRequestById,
   listOrganizationRequests,
+  exportOrganizationRequestsCsv,
   listAssignedRequests,
   updateRequestStatus,
   assignRequestOperator,
@@ -19,6 +20,7 @@ const {
   addCompletionImages,
   removeCompletionImage,
   getRequestAttachmentContent,
+  getRequestActivities,
   managerUpdateRequest,
   managerCancelRequest,
   managerCloseRequest,
@@ -132,6 +134,23 @@ router.get(
   getRequestAttachmentContent,
 );
 
+// DOC-17 - "Request Activity Timeline". Registered here, alongside the
+// content-delivery route right above it, for the identical reason: it is
+// reachable by Employee, Operator, AND Manager (System Admin explicitly
+// rejected inside the controller) - no single-role chain can express
+// that. `:requestId` (not `:id`) matches the content-delivery route's own
+// parameter naming for this specific sub-resource shape, and its trailing
+// `/activities` segment can never collide with any other route on this
+// router regardless of registration order.
+router.get(
+  '/:requestId/activities',
+  verifyToken,
+  requirePasswordChangeCompleted,
+  requireOrganizationMembership,
+  requireActiveOrganization,
+  getRequestActivities,
+);
+
 // DOC-52 - Manager assignment + the two whole-list endpoints, all
 // registered here (ahead of the blanket Employee-only gate below) for the
 // same reason DOC-12's status endpoint and DOC-13's comment endpoints
@@ -159,6 +178,30 @@ router.get(
   requireOrganizationMembership,
   requireActiveOrganization,
   listOrganizationRequests,
+);
+// DOC-67 - "Request Reports & CSV Export". Registered here, immediately
+// alongside GET /organization, for the exact same route-ordering reason
+// this file's own header comment already documents for that route and
+// GET /assigned: both must be reachable ahead of the Employee-only blanket
+// gate below. `/organization/export` is a distinct, two-segment literal
+// path - it can never collide with the one-segment `/:id` pattern
+// registered further down (Express path parameters match exactly one path
+// segment - the same non-collision guarantee this file's own header
+// comment already documents for `/statistics/mine` etc.), nor with
+// `/organization` itself (a different, longer path). Manager-only, same
+// three-part authorization chain as GET /organization - Employee/Operator/
+// System Admin tokens are all rejected before this handler is ever
+// reached; System Admin gains no export access here (it has no
+// organizationId at all, so requireOrganizationMembership would reject it
+// even if requireRole('manager') did not).
+router.get(
+  '/organization/export',
+  verifyToken,
+  requirePasswordChangeCompleted,
+  requireRole('manager'),
+  requireOrganizationMembership,
+  requireActiveOrganization,
+  exportOrganizationRequestsCsv,
 );
 router.get(
   '/assigned',

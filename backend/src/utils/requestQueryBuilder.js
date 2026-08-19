@@ -170,7 +170,8 @@ async function buildRequestQuery({
   const params = queryParams || {};
   const query = { ...baseQuery };
 
-  // --- q (text search: title OR description, case-insensitive) ---------
+  // --- q (text search: title OR description OR requestNumber, case-
+  // insensitive) ---------
   if (params.q !== undefined && params.q !== '') {
     if (typeof params.q !== 'string') {
       return { error: { status: 400, message: 'q must be a single text value.' } };
@@ -185,7 +186,21 @@ async function buildRequestQuery({
     // clears itself if the Employee/Operator/Manager only typed spaces.
     if (trimmed.length > 0) {
       const pattern = new RegExp(escapeRegExp(trimmed), 'i');
-      query.$or = [{ title: pattern }, { description: pattern }];
+      // DOC-16 (task spec section 17) - `requestNumber` reuses the exact
+      // same case-insensitive, regex-escaped SUBSTRING match already
+      // established for title/description here - no new query parameter,
+      // no special-casing. This is a deliberate, documented behavior
+      // choice: searching the full `REQ-000123` matches exactly, and
+      // searching a bare fragment like `000123` ALSO matches (a plain
+      // substring match against the stored `REQ-000123` string), which is
+      // the same predictable "contains" semantics this search box already
+      // has for title/description - chosen over a stricter "must start
+      // with REQ-" or "must be the full number" rule specifically for
+      // consistency, not because a numeric input needs different handling.
+      // A historical Request with no `requestNumber` yet (`null`) simply
+      // never matches this clause - nothing new to migrate here, it just
+      // falls out of a regex never matching a non-string field.
+      query.$or = [{ title: pattern }, { description: pattern }, { requestNumber: pattern }];
     }
   }
 

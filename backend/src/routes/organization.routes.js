@@ -2,12 +2,13 @@ const express = require('express');
 const verifyToken = require('../middleware/auth');
 const requireRole = require('../middleware/requireRole');
 const requirePasswordChangeCompleted = require('../middleware/requirePasswordChangeCompleted');
-const { requireOrganizationMembership } = require('../middleware/organizationScope');
+const { requireOrganizationMembership, requireActiveOrganization } = require('../middleware/organizationScope');
 const {
   createOrganization,
   listOrganizations,
   getOrganization,
   getMyOrganization,
+  updateMyOrganization,
   updateOrganization,
   regenerateCompanyCode,
   assignManager,
@@ -36,6 +37,32 @@ const router = express.Router();
 // PATCH /api/auth/change-password), so it is blocked like everything else
 // while the caller's own mustChangePassword is true.
 router.get('/me', verifyToken, requirePasswordChangeCompleted, requireOrganizationMembership, getMyOrganization);
+
+// DOC-61 - "Organization Settings for Manager". Registered here, right
+// alongside GET /me, for the identical structural reason: it must be
+// reachable by a Manager token and can never share the blanket
+// system_admin-only `router.use(...)` gate a few lines below. Unlike
+// GET /me (any organization-scoped role may read their own Organization),
+// this is Manager-ONLY (`requireRole('manager')`) - Employee/Operator
+// tokens are rejected before `updateMyOrganization` is ever reached (task
+// spec section 2: "Manager should have Organization Settings"; section 26
+// tests 3/4: "Employee rejected" / "Operator rejected"). Also requires
+// `requireActiveOrganization` (GET /me deliberately does not - a Manager
+// whose Organization has been deactivated by System Admin can still SEE
+// their own settings, matching every other read-only endpoint in this
+// project, but cannot edit them while deactivated - the same
+// active-required gate every other Manager business-mutation route in
+// this project already composes, e.g. request.routes.js's
+// PATCH /:id/manager).
+router.patch(
+  '/me',
+  verifyToken,
+  requirePasswordChangeCompleted,
+  requireRole('manager'),
+  requireOrganizationMembership,
+  requireActiveOrganization,
+  updateMyOrganization,
+);
 
 // Every Organization-management route below this point is global System
 // Admin functionality (DOC-32/DOC-34). Authentication alone is not enough:

@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import RequestStatusBadge from './RequestStatusBadge.jsx';
 import RequestSlaBadge from './RequestSlaBadge.jsx';
+import RequestNumberBadge from './RequestNumberBadge.jsx';
 import AuthenticatedRequestImage from './AuthenticatedRequestImage.jsx';
+import RequestActivityTimeline from './RequestActivityTimeline.jsx';
+import { PRIORITY_LABELS } from '../utils/requestLabels.js';
 
 // DOC-11 - a single row in the Employee Dashboard's "My Requests" table,
 // mirroring the inline-expand pattern OrganizationUserRow.jsx and
@@ -119,7 +122,10 @@ import AuthenticatedRequestImage from './AuthenticatedRequestImage.jsx';
 // which Employee opened the Request (task spec section 9) - it is simply
 // absent (`undefined`) on every Employee-facing response, so this field
 // never appears on the Employee's own "My Requests" view.
-const PRIORITY_LABELS = { low: 'Low', medium: 'Medium', high: 'High' };
+// DOC-69 - PRIORITY_LABELS now imported from utils/requestLabels.js (one
+// centralized mapping shared with ManagerRequestRow.jsx/
+// ManagerDashboard.jsx/RequestStatusBadge.jsx) instead of being
+// redeclared in every file that needs it.
 const PRIORITY_OPTIONS = [
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
@@ -524,7 +530,19 @@ function RequestRow({
   return (
     <>
       <tr>
-        <td>{request.title}</td>
+        {/* DOC-16 - "Request Number / Human-Friendly ID" (task spec
+            section 14). Displayed inline within the existing title cell
+            rather than as a new dedicated column - adding a column here
+            would also require updating this table's <thead> and the
+            expanded detail row's colSpan below, a larger, riskier change
+            than this ticket needs. `null` for a historical, not-yet-
+            migrated Request simply renders nothing (RequestNumberBadge's
+            own contract) - the title alone is shown, exactly as before
+            DOC-16. */}
+        <td>
+          <RequestNumberBadge requestNumber={request.requestNumber} />
+          {request.title}
+        </td>
         <td>{request.category ? request.category.name : 'Unknown category'}</td>
         <td>{PRIORITY_LABELS[request.priority] || request.priority}</td>
         <td>
@@ -651,9 +669,12 @@ function RequestRow({
                         >
                           Keep Request
                         </button>
+                        {/* DOC-69 - `.btn-danger`, for visual consistency
+                            with every other destructive confirm action in
+                            this project (task spec section 16). */}
                         <button
                           type="button"
-                          className="btn btn-primary"
+                          className="btn btn-danger"
                           disabled={cancelPending}
                           onClick={handleCancelRequest}
                         >
@@ -990,6 +1011,10 @@ function RequestRow({
                   </p>
                 )}
               </div>
+
+              {/* DOC-17 - self-contained, fetches on its own the moment this
+                  panel is expanded; no new props/state needed on this row. */}
+              <RequestActivityTimeline requestId={request.id} />
             </div>
           </td>
         </tr>

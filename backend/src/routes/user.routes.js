@@ -7,12 +7,47 @@ const {
   listOrganizationUsers,
   updateUserRole,
   updateUserProfile,
+  updateMyProfile,
   updateUserStatus,
   updateUserSpecialties,
   resetUserPassword,
 } = require('../controllers/user.controller');
 
 const router = express.Router();
+
+// DOC-62 - "User Profile". Registered BEFORE the blanket manager-only
+// `router.use(...)` gate below, with its own small, independent chain -
+// this route must be reachable by EVERY authenticated role (system_admin/
+// manager/operator/employee), not just Manager. Composition, in order:
+//   verifyToken                  -> WHO is calling (fresh DB-backed
+//                                    context, DOC-38)
+//   requirePasswordChangeCompleted -> a user whose OWN mustChangePassword
+//                                    is true cannot use this endpoint
+//                                    (task spec section 3/24: "Do not
+//                                    accidentally let mustChangePassword
+//                                    users bypass the forced change by
+//                                    visiting Profile") - they must clear
+//                                    that via PATCH /api/auth/change-
+//                                    password first, exactly like every
+//                                    other normal business route already
+//                                    requires. GET /api/auth/me (reused
+//                                    for READING a profile) deliberately
+//                                    stays exempt from this gate, unchanged
+//                                    - only this MUTATING endpoint adds it.
+// Deliberately NOT composed with requireRole(...) or
+// requireOrganizationMembership: system_admin's own organizationId is
+// always null (DOC-31) and it must still be able to update its own
+// fullName here - this is genuinely role-agnostic, self-scoped-only
+// authorization, the same shape /api/organizations/me (DOC-42/DOC-61)
+// already established for exactly this reason.
+//
+// Registered as a literal `/me` segment ahead of `/:id` below (and ahead
+// of this router's own blanket gate) - the same non-collision-by-
+// registration-order convention this project's other routers already
+// document (a literal `/me` would otherwise be captured by `/:id` if `/:id`
+// were registered first, since Express matches by registration order, not
+// specificity).
+router.patch('/me', verifyToken, requirePasswordChangeCompleted, updateMyProfile);
 
 // DOC-35 - Organization user-role management is Manager-only. System Admin
 // deliberately does NOT get access through this router - it already has

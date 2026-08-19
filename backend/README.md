@@ -497,6 +497,245 @@ expose its global `/api/organizations/:id` endpoint more broadly.
   it is inactive on their own dashboard, so this route only requires
   membership, not an active Organization.
 
+## Organization Settings for Manager (DOC-61)
+
+`PATCH /api/organizations/me` lets the Organization's own **Manager** (and
+only the Manager - not Employee/Operator/System Admin) view-and-edit a
+small set of organization-level profile fields, without granting Manager
+any System Admin capability. This sits alongside `GET /api/organizations/me`
+(DOC-42 above) - the two together are the Manager Dashboard's entire
+"Organization Settings" panel.
+
+**What a Manager can edit:** `name`, `description`, `contactEmail`,
+`contactPhone`. **What a Manager can only view (never edit through this or
+any Manager-facing endpoint):** `companyCode` (regeneration stays
+System-Admin-only, `POST /:id/regenerate-code`), `isActive` (activation/
+deactivation stays System-Admin-only, `PATCH /:id`), `createdAt`. Manager
+can never create or delete Organizations, and this endpoint never turns
+Manager into System Admin - it only ever touches the caller's own single
+Organization document.
+
+- **Middleware chain**: `verifyToken` → `requirePasswordChangeCompleted` →
+  `requireRole('manager')` → `requireOrganizationMembership` →
+  `requireActiveOrganization` → `updateMyOrganization`. Registered directly
+  below `GET /me` in `routes/organization.routes.js`, with its own smaller
+  chain, for the identical structural reason `GET /me` has one (it must be
+  reachable by a Manager token and can never be swept into the router-wide
+  `requireRole('system_admin')` gate a few lines below).
+- **No `:id` in the route.** Exactly like `GET /me`, the target Organization
+  is always `req.user.organizationId` - never read from
+  `req.body`/`req.query`/`req.params`. A Manager cannot update another
+  Organization by forging a URL, body, or query value; there is structurally
+  nothing to forge, since this endpoint never looks at any of those for the
+  target id.
+- **`requireActiveOrganization` gates this route but not `GET /me`.** A
+  Manager whose Organization has been deactivated can still see their
+  settings (read-only, matches DOC-42) but cannot edit them until a System
+  Admin reactivates the Organization - the same "read stays open, mutation
+  requires active" pattern this project's other Manager business routes
+  already use (e.g. `PATCH /:id/manager` and `/organization/export` in
+  `request.routes.js`).
+- **Explicit allowlist, never mass assignment.** The controller builds an
+  `updates` object field-by-field (`name`/`description`/`contactEmail`/
+  `contactPhone`, only if present in the body and only after passing
+  validation), then applies it with
+  `Object.assign(organization, updates)` - never
+  `Object.assign(organization, req.body)`. This mirrors the same
+  already-audited-safe shape System Admin's own `PATCH /:id`
+  (`updateOrganization`) already uses.
+- **Forbidden fields are hard-rejected, not silently dropped.** Before any
+  allowed field is even looked at, the request body is checked against
+  `FORBIDDEN_ORGANIZATION_SELF_UPDATE_FIELDS` - `companyCode`, `isActive`,
+  `createdAt`, `updatedAt`, `createdBy`, `manager`, `managerId`,
+  `organizationId`, `_id`, `id`, `users`. If the body contains **any** of
+  these, the whole request is rejected with `400` and a clear message
+  (`"<field> cannot be updated through this endpoint."`) - a request that
+  mixes a legitimate field with a forged one (e.g.
+  `{ name: "New Name", isActive: false }`) is rejected in full, never
+  partially applied.
+- **Field validation** (`400` on failure, same response shape as every
+  other endpoint in this file):
+  - `name` - required, non-empty after trim, 2-100 characters (same rule as
+    Organization creation).
+  - `description` - optional, plain text only (rejects arrays/objects/
+    numbers), max 1000 characters. Rendered as plain text on the frontend,
+    never `dangerouslySetInnerHTML`.
+  - `contactEmail` - optional, must match the same `EMAIL_REGEX` used
+    everywhere else in this project if provided. This is **presentation-only
+    contact information** - it is never read from or written to any `User`
+    document, never checked for uniqueness, and can never change a Manager's
+    own login email (`User.email`, changed only via the existing DOC-57
+    account-settings flow).
+  - `contactPhone` - optional, max 30 characters, permissive international
+    format (digits, `+`, spaces, parentheses, hyphens; at least one digit
+    required) - deliberately not restricted to a single country's numbering
+    plan.
+  - An empty/whitespace-only string for any of the three optional fields
+    normalizes to `null` (never stored as `''`), matching every historical
+    Organization document that never had these fields at all.
+  - A request whose body contains none of `name`/`description`/
+    `contactEmail`/`contactPhone` (after the forbidden-field check passes)
+    returns `400` - `"No valid fields to update. Allowed fields: ..."`.
+- **Partial updates.** Only the fields actually present in the request body
+  are validated/changed; omitted fields, and fields re-sent with their
+  current value, are both safe no-ops.
+- **Response shape is identical to every other Organization endpoint**
+  (`sanitizeOrganization`/`enrichOrganization`) - `description`,
+  `contactEmail`, `contactPhone` are now included on every Organization
+  response project-wide (System Admin's list/detail/update endpoints too),
+  each defaulting to `null` for a historical Organization created before
+  this ticket, so no consumer needs special-case handling for "field might
+  not exist yet".
+- **Schema note (`models/Organization.js`).** `description`
+  (trimmed, max 1000 chars), `contactEmail` (trimmed, lowercased, max-
+  length none, format validated at the controller layer), `contactPhone`
+  (trimmed, max 30 chars, format validated at the controller layer, not via
+  a schema `match`) were added, all `default: null`. No migration is
+  required - a document that never had these fields simply reads back
+  `null`/`undefined`, which this schema and every consumer already treat
+  identically.
+- **Logo/branding - deliberately deferred, not built.** This ticket
+  explicitly allows deferring an actual logo upload; no `logoUrl` field, no
+  binary upload endpoint, and no reuse of the Request feature's S3 storage
+  were added. If a simple logo capability is wanted later, the smallest
+  safe next step is a validated `logoUrl` string field (same shape as
+  `contactEmail`/`contactPhone` above) rather than binary upload
+  infrastructure.
+- **Not built here, on purpose:** no audit-log entry (DOC-64 is a separate,
+  future ticket - `updateMyOrganization` is kept intentionally small and
+  linear - validate, build `updates`, save, respond - so DOC-64 can later
+  insert one audit-record call after the `.save()` without needing to
+  restructure this function), no DOC-18 notification (would be noise for a
+  non-Request action), no `RequestActivity`/timeline event (this is not a
+  Request lifecycle action).
+- **Frontend**: `ManagerDashboard.jsx`'s existing "Organization Information"
+  panel (DOC-42) is now "Organization Settings" - the same panel, no new
+  route/page. Name/Description/Contact Email/Contact Phone render as
+  editable fields; Company Code/Organization Status/Created render as
+  read-only display values (never inputs). Save is disabled while a save is
+  already in flight and disabled again once saved values match what's
+  loaded (nothing to save) - both checked in the submit handler itself, not
+  only via the button's `disabled` attribute. Only the fields that changed
+  are sent in the `PATCH` body. Errors reuse the same `getApiErrorMessage`
+  helper (DOC-69) as the rest of the app - a raw `AxiosError`/
+  `MongoServerError`/`CastError` is never shown to the user.
+
+## User Profile (DOC-62)
+
+`PATCH /api/users/me` lets ANY authenticated user (`system_admin`, `manager`,
+`operator`, `employee` alike) edit exactly one thing about their own
+account - their `fullName`. Reading a profile reuses the existing
+`GET /api/auth/me` (DOC-33/DOC-57) unchanged - this ticket added no new
+read endpoint, per its own "prefer reusing GET /api/auth/me" guidance.
+
+**What a user can edit:** `fullName` only. **What a user can only view
+(never edit through this or any self-facing endpoint):** `email`, `role`,
+`organizationId`, `isActive`, `createdAt`. A user can never change their own
+role, their own organization, or activate/reactivate themselves - both by
+explicit hard rejection here and because no other self-facing endpoint in
+this project grants any of those either.
+
+- **Middleware chain**: `verifyToken` → `requirePasswordChangeCompleted` →
+  `updateMyProfile`. Registered in `routes/user.routes.js` *before* that
+  router's blanket `requireRole('manager')` gate, with its own smaller,
+  independent chain - the same structural reason `GET/PATCH /organizations/me`
+  (DOC-42/DOC-61) already have theirs registered ahead of their own
+  routers' blanket gates. Deliberately **not** composed with
+  `requireRole(...)` or `requireOrganizationMembership` - this is genuinely
+  role-agnostic, self-scoped-only authorization, and `system_admin`'s own
+  `organizationId` is always `null` (DOC-31), so it must still be able to
+  reach this route.
+- **`requirePasswordChangeCompleted` gates this route.** A user whose own
+  `mustChangePassword` is `true` cannot use `PATCH /api/users/me` until they
+  clear that flag via `PATCH /api/auth/change-password` first - the same
+  "normal business route" treatment every other mutating endpoint in this
+  project already gets. `GET /api/auth/me` (used to READ a profile)
+  deliberately stays exempt, unchanged - only the new mutating endpoint
+  adds this gate, so a forced-change user still cannot use Profile to dodge
+  the forced change (task spec section 3/24).
+- **No `:id` in the route.** The target user is always
+  `req.user.userId` - the trusted identity `middleware/auth.js`'s
+  `verifyToken` populates from a verified JWT, then re-confirmed with a
+  fresh `User.findById` read inside the controller. There is no
+  `req.params.id`/`req.body.userId`/`req.query.userId` read anywhere in
+  `updateMyProfile`, so a client-supplied `userId` in the body is simply
+  never read (structurally has zero effect) - this endpoint cannot update
+  any User document other than the caller's own, regardless of what a
+  client sends.
+- **Explicit allowlist of exactly one field, never mass assignment.**
+  `FORBIDDEN_SELF_PROFILE_FIELDS` is checked FIRST and rejects the entire
+  request (`400`) if the body contains any of `role`, `organizationId`,
+  `isActive`, `password`, `passwordHash`, `mustChangePassword`,
+  `createdAt`, `updatedAt`, `_id`, `id`, `email`, `specialties` - never
+  silently ignored, never partially applied. A request mixing a legitimate
+  `fullName` with a forged field (e.g. `{ fullName: "New", role:
+  "system_admin" }`) is rejected in full. Only `user.fullName = ...` is
+  ever assigned - never `Object.assign(user, req.body)`.
+- **`fullName` validation** (`400` on failure): required, non-empty after
+  trim, 2-100 characters, rejects non-string (array/object) payloads
+  outright via a `typeof` check before `.trim()` is ever called. This is a
+  NEW, stricter rule than Register's own "just non-empty" check and DOC-50's
+  Manager-facing `updateUserProfile`'s own "just non-empty" check - both of
+  those are left completely unchanged; this bound applies only to the new
+  self-service endpoint.
+- **Email decision: kept read-only, deliberately (task spec section 7).**
+  The audit for this ticket confirmed a self-service email change *could*
+  be made technically safe - the JWT payload only ever carries
+  `{ userId, role }` (never email - see `login` in
+  `controllers/auth.controller.js`), and `verifyToken` re-reads the user by
+  `_id` on every request, never by email, so a changed email would not
+  invalidate any existing session or require a token refresh. However, no
+  product requirement in this ticket calls for it, and enabling it would
+  add a second live email-uniqueness/normalization/collision surface to
+  reason about and test (on top of the one DOC-50's Manager-facing
+  `updateUserProfile` already owns) for zero requested benefit, with no
+  email-confirmation flow in this project to guard against a mistyped or
+  hijacked address. A body containing `email` is therefore hard-rejected
+  (`400`, `"email cannot be updated through this endpoint."`), the same
+  shape as every other forbidden field, not silently ignored - matching
+  the task spec's own "if read-only: forged email update rejected" test
+  requirement. If a genuine product need for self-service email changes
+  emerges later, the safest next step is to mirror `updateUserProfile`'s
+  own already-audited pattern here (format validation + normalize +
+  uniqueness check), not to invent a new one.
+- **`specialties` is included in the forbidden list defensively**, even
+  though nothing about this endpoint would otherwise touch it - DOC-44
+  specialties remain exclusively Manager-managed (`PATCH
+  /api/users/:id/specialties`), and this keeps that true even against a
+  forged self-update payload.
+- **Response shape is `sanitizeUser`** (`auth.controller.js`) - the exact
+  same safe shape `GET /api/auth/me` already returns (`id`, `fullName`,
+  `email`, `role`, `organizationId`, `isActive`, `mustChangePassword`,
+  `createdAt`). Never `passwordHash`. The frontend's `AuthContext.updateUser`
+  (already used by the DOC-57 Change Password page) accepts this shape
+  directly with no adapter needed.
+- **Password management is not duplicated here.** There is no
+  password-related field this endpoint reads or writes at all - Profile's
+  own frontend page only ever links to the existing `/change-password`
+  route (DOC-57's `PATCH /api/auth/change-password`), never a second
+  password-change implementation.
+- **Not built here, on purpose:** no audit-log entry (DOC-64 is a separate,
+  future ticket - `updateMyProfile` is kept intentionally small and linear -
+  validate, save, respond - so DOC-64 can later insert one audit-record
+  call after the `.save()` without needing to restructure this function),
+  no DOC-18 notification and no `RequestActivity`/timeline event (a user
+  renaming themselves is not a Request lifecycle action and would only be
+  noise), no profile picture/avatar (no such support exists anywhere in
+  this project prior to this ticket, and none was added - the ticket
+  explicitly makes this optional and conditional on existing support).
+- **Frontend**: a new, single, role-agnostic `/profile` page
+  (`frontend/src/pages/Profile.jsx`) shown to every authenticated role,
+  wrapped in the plain `<ProtectedRoute>` (no `roles` restriction) - a
+  forced-password-change user is redirected to `/change-password` before
+  ever seeing this page's content, unchanged existing behavior. Shows Full
+  Name (editable), Email/Role/Organization/Account Status/Member Since
+  (all read-only), a `Save Changes` button (disabled while pending or
+  while nothing has changed, rechecked in the submit handler itself), and
+  a `Change Password` link to the existing page. A new `My Profile` link
+  was added to the Navbar for every authenticated role, hidden during the
+  forced-password-change state the same way the Dashboard/Chat/
+  Notifications links already are.
+
 ## Delete Organization Safely (DOC-47)
 
 `DELETE /api/organizations/:id` (`system_admin` only, `verifyToken` →
@@ -3298,3 +3537,1397 @@ restart, and no existing image ever deleted.
   that path once needed. (3) There is currently no scheduled/automatic
   run of the migration script - it is a manual, explicit command, exactly
   like the GridFS migration script before it.
+
+## Request Activity Timeline (DOC-17)
+
+A chronological, organization-isolated history of everything that
+happens to a Request - who did what, and when - viewable by anyone who
+could already view that Request (Employee/own, Operator/assigned,
+Manager/any-in-org). Does **not** replace or restructure the existing
+Request workflow, Comments, or role permissions in any way - it is a
+purely additive, read-mostly audit trail layered on top of the
+already-shipped Request lifecycle.
+
+- **Architecture**: a separate `RequestActivity` collection
+  (`models/RequestActivity.js`), **not** an embedded array on `Request` -
+  the same reasoning that already put `Comment` (DOC-13) and
+  `ChatMessage` (DOC-60) in their own collections applies here: an
+  unbounded, ever-growing list embedded on the parent document risks the
+  16MB BSON document ceiling on a long-lived, heavily-edited Request, and
+  a separate collection lets `{requestId, createdAt}` be indexed and
+  paginated properly. Shape: `{_id, organizationId, requestId, actorId,
+  type, oldValue, newValue, metadata, createdAt, updatedAt}` -
+  `organizationId`/`requestId` are always derived server-side from the
+  already-loaded, already-authorized Request document, never from
+  `req.body`/`req.query`. Only `actorId` is stored for "who" (never a
+  copied snapshot of sensitive User fields) - the API layer resolves it
+  to a safe `{id, fullName, role}` at read time, and a since-deactivated
+  actor's real name is still shown (this project never hard-deletes a
+  User - DOC-48 is soft-deactivation only); only a User document that
+  somehow no longer resolves at all falls back to `"Unknown user"`.
+- **Activity type enum** (`RequestActivity.ACTIVITY_TYPES`, enforced by
+  the schema's own `enum` validator - never an arbitrary free-text
+  event): `REQUEST_CREATED`, `REQUEST_UPDATED`, `PRIORITY_CHANGED`,
+  `CATEGORY_CHANGED`, `ASSIGNED`, `REASSIGNED`, `UNASSIGNED`,
+  `STATUS_CHANGED`, `REQUEST_CANCELLED`, `REQUEST_REOPENED`,
+  `REQUEST_CLOSED`, `BEFORE_IMAGE_ADDED`, `BEFORE_IMAGE_REMOVED`,
+  `COMPLETION_IMAGE_ADDED`, `COMPLETION_IMAGE_REMOVED`.
+- **One meaningful event per user action** (never two for the same
+  transition): closing a Request always records `REQUEST_CLOSED` -
+  whether it happened via the generic `PATCH /requests/:id/status`
+  endpoint or the dedicated `PATCH /requests/:id/manager/close` endpoint
+  - never `STATUS_CHANGED resolved->closed` as well. Reopening
+  (`resolved -> reopened`, the only status this project's transition
+  rules ever allow into `reopened`) similarly always records
+  `REQUEST_REOPENED`, never a generic `STATUS_CHANGED` alongside it.
+  Every other transition (`open->in_progress`, `in_progress->resolved`,
+  `reopened->in_progress`) records the generic `STATUS_CHANGED`.
+  `cancelled` can never be reached through the generic status endpoint at
+  all (`utils/requestStatusTransitions.js` already refuses it
+  unconditionally) - only the two dedicated cancel endpoints
+  (`cancelMyRequest`/`managerCancelRequest`) ever record
+  `REQUEST_CANCELLED`.
+- **Display-value resolution: write-time snapshot, not read-time
+  lookup.** For reference-typed events (`CATEGORY_CHANGED`, `ASSIGNED`,
+  `REASSIGNED`, `UNASSIGNED`), the human-readable name of the
+  category/operator involved is resolved ONCE, at the moment the event
+  is written, and stored directly in that event's own `metadata`
+  (`oldCategoryName`/`newCategoryName`, `previousOperatorName`/
+  `newOperatorName`) - never re-resolved live every time the timeline is
+  later read. This was a deliberate choice over live resolution: it is
+  more historically honest (a category rename or an Operator's later
+  deactivation can never silently rewrite what an old timeline entry
+  displays) and it avoids extra N+1 batch lookups on every future read of
+  a long timeline. `oldValue`/`newValue` for these event types still
+  store the raw ObjectId internally (for any future programmatic use);
+  the API layer (`buildActivityDisplayValues` in
+  `controllers/request.controller.js`) is what ever chooses between the
+  raw scalar (for `STATUS_CHANGED`/`PRIORITY_CHANGED`/
+  `REQUEST_CANCELLED`/`REQUEST_REOPENED`/`REQUEST_CLOSED`) and the
+  snapshotted display name (for the four reference-typed events) - a raw
+  Mongo ObjectId for a category/operator is never sent to the client.
+- **`requestActivity.service.js` - the one place activities are ever
+  written.** No controller function ever calls
+  `RequestActivity.create(...)` directly - every write goes through
+  `recordRequestActivity({request, actorId, type, oldValue, newValue,
+  metadata})`, which derives `organizationId`/`requestId` from the
+  already-saved `request` document and never accepts them as separate,
+  independently-trustable arguments. This mirrors the same
+  "one owner of write logic" discipline `services/requestImageStorage.js`
+  already established for image storage.
+- **Failure strategy: best-effort, never blocks the primary Request
+  write.** `recordRequestActivity` is always called AFTER the
+  corresponding `requestDoc.save()`/`Request.create()` has already
+  succeeded, and it swallows its own errors internally (`console.error`,
+  never throws) - a rare activity-log write failure produces a Request
+  whose real business state is fully correct but has one gap in its
+  displayed timeline, never a Request update that gets silently rolled
+  back or blocked by a logging failure. A real MongoDB multi-document
+  transaction was deliberately **not** used to make the pair atomic:
+  transactions require a replica set (or mongos), and would throw
+  immediately ("Transaction numbers are only allowed on a replica set
+  member or mongos") against a standalone `mongod` - a completely normal
+  local/development configuration this project must not break. This is a
+  documented trade-off, not an oversight - see
+  `services/requestActivity.service.js`'s own top comment.
+- **Write sites** (every place a Request-mutating controller function
+  now also calls `recordRequestActivity`, always after its own successful
+  save): `createRequest` (`REQUEST_CREATED`), `updateRequestStatus`
+  (`STATUS_CHANGED`/`REQUEST_CLOSED`/`REQUEST_REOPENED`),
+  `updateMyRequest` (up to three independent events per call -
+  `REQUEST_UPDATED`/`PRIORITY_CHANGED`/`CATEGORY_CHANGED` - each only if
+  that specific field's value actually changed, never a `medium->medium`
+  no-op event), `cancelMyRequest` (`REQUEST_CANCELLED`, no reason),
+  `addRequestAttachments`/`removeRequestAttachment`
+  (`BEFORE_IMAGE_ADDED`/`BEFORE_IMAGE_REMOVED` - one event per upload
+  *action*, not one per file), `addCompletionImages`/
+  `removeCompletionImage` (`COMPLETION_IMAGE_ADDED`/
+  `COMPLETION_IMAGE_REMOVED`), `assignRequestOperator`
+  (`ASSIGNED`/`REASSIGNED`), `managerUpdateRequest` (up to three events -
+  `PRIORITY_CHANGED`/`CATEGORY_CHANGED`/`ASSIGNED`|`REASSIGNED`|
+  `UNASSIGNED`), `managerCancelRequest` (`REQUEST_CANCELLED`, with
+  `cancelReason` in metadata - already normal, non-sensitive,
+  already-visible data on this same Request's own response shape),
+  `managerCloseRequest` (`REQUEST_CLOSED`, the identical type
+  `updateRequestStatus`'s own closed branch uses).
+- **DOC-15 separation**: assignment-related events
+  (`ASSIGNED`/`REASSIGNED`/`UNASSIGNED`) only ever record the four fields
+  this ticket itself asks for - old operator, new operator, actor,
+  timestamp. No mandatory reassignment reason, approval workflow, or
+  analytics field exists here by design, so a future DOC-15 ("Operator
+  Reassignment Workflow") can extend this event's `metadata` later
+  without a schema redesign.
+- **Comments stay separate from the timeline, on purpose.** No comment is
+  ever automatically duplicated into `RequestActivity` - Comments
+  (DOC-13) remain the communication surface; the Activity Timeline remains
+  the lifecycle/system-activity surface. They are two different
+  concerns that happen to both render inside the same Request detail
+  view.
+- **`GET /api/requests/:requestId/activities`** (Employee/Operator/Manager
+  only - System Admin is rejected 403 unconditionally, before any Request
+  lookup even runs, mirroring the image-content-delivery endpoint's own
+  convention; System Admin gains no new day-to-day operational Request
+  access just because this endpoint exists). Authorization mirrors this
+  Request's existing visibility rules exactly (a small, deliberately
+  independent `canViewRequestActivities` helper - Employee/own Request
+  only, Operator/assigned Request only, Manager/any Request in their
+  Organization): Employee A can never view Employee B's Request timeline,
+  Operator A can never view an unassigned Request's timeline, Manager A
+  can never view Organization B's Request timeline (a cross-organization
+  or nonexistent `requestId` both collapse into the same 404 - the DOC-38
+  anti-enumeration convention already used everywhere else in this
+  controller; wrong-role/wrong-assignee within the caller's own
+  organization is an honest 403, since organization membership is already
+  established by that point). Returns activities **oldest-first**
+  (matching the ticket's own worked example, which reads top-to-bottom -
+  "Request created -> Priority changed -> Assigned -> ..."), even though
+  the underlying query runs newest-first internally (so an optional
+  `limit` naturally keeps the most recent N events of whichever window is
+  selected) and is reversed immediately before responding. Pagination is
+  deliberately simple (task spec: "avoid overengineering") - an optional
+  `limit` (integer, 1-200, default 100) and an optional `before` (an
+  activity id already returned by an earlier call, fetching the next
+  OLDER page) - `before` must itself belong to the same, already-
+  authorized Request, so it can never be used to probe another Request's
+  activity timing. Response shape per activity: `{id, type, actor:{id,
+  fullName, role}, oldValue, newValue, metadata, createdAt}` - never
+  `organizationId`, `__v`, or any internal Mongo/storage/credential field.
+- **Frontend**: `RequestActivityTimeline.jsx` is a small, self-contained
+  component (mirrors `AuthenticatedRequestImage.jsx`'s own
+  "reads `token` from `useAuth()` and calls the backend itself" shape) -
+  it needs only a `requestId` prop and fetches
+  `requestApi.getActivities(requestId, token)` itself the moment it
+  mounts (i.e. only once the row it lives in is actually expanded - it is
+  never rendered, and therefore never fetches, for a collapsed row).
+  `type`/`oldValue`/`newValue`/`metadata` are mapped to a human-readable
+  English sentence entirely on the frontend (`describeActivity`) - the
+  database never stores a finished UI sentence, only structured data, so
+  future localization/reformatting never requires a data migration. Wired
+  into `RequestRow.jsx` (Employee/Operator dashboards, as a sibling block
+  after Comments inside the same expanded detail panel) and
+  `ManagerRequestRow.jsx` (its own "View Timeline" toggle + own `<tr>`,
+  matching that row's existing "View Images" toggle shape, since that
+  row has no single shared detail panel the way `RequestRow.jsx` does).
+  A Request with zero activity (any Request created before this feature
+  shipped, and never backfilled) shows "No activity recorded yet." -
+  never a blank gap or a crash.
+- **Optional historical backfill**: `npm run backfill:request-activity`
+  (`scripts/backfillRequestActivity.js`) - manual command only, never run
+  on server startup, safe to run any number of times (idempotent - a
+  Request that already has at least one activity record, from live usage
+  or an earlier run of this exact script, is left completely untouched).
+  For every Request with zero activity records, creates exactly ONE
+  `REQUEST_CREATED` event using only data already honestly on that
+  Request document (`createdBy` as the actor, `createdAt` as the
+  timestamp) - it never invents who assigned an operator, who changed
+  status, or when priority changed, because no honest record of exactly
+  when/by-whom those real historical changes happened exists to backfill
+  from. Every backfilled event carries `metadata.backfilled: true`, so it
+  stays distinguishable from a genuinely live-recorded `REQUEST_CREATED`.
+- **Indexes**: `{requestId: 1, createdAt: 1}` and `{organizationId: 1,
+  requestId: 1, createdAt: 1}` - no others added (task spec: "do not add
+  unnecessary indexes").
+- **Immutability**: `RequestActivity` documents are audit-like historical
+  data - there is no `PATCH`/`DELETE` endpoint for an individual activity
+  anywhere in this project, and none is planned; once written, an
+  activity is never edited or removed through the API (the same "prefer
+  preserving history over destructive deletion" principle this project
+  already applies to Organizations - DOC-47 - and Employees - DOC-48).
+- **Test summary**: a temporary mocked-controller test harness
+  (`backend/__doc17_test.js`, deleted after this run) injected fake
+  in-memory `Request`/`ServiceCategory`/`User`/`RequestActivity` models
+  and a fake `requestImageStorage` directly into Node's `require.cache`
+  before requiring the REAL, unmodified
+  `controllers/request.controller.js` and
+  `services/requestActivity.service.js` - every other dependency
+  (`utils/requestStatusTransitions`, `utils/requestFieldValidation`,
+  `utils/requestQueryBuilder`, `utils/requestStatistics`,
+  `utils/duplicateRequestDetection`, `utils/slaPolicy`, `mongoose` itself)
+  ran as real, unmocked production code. Covered: Model/Service (schema
+  validation, enum enforcement, Mixed-type null round-tripping,
+  `recordRequestActivity` deriving ids server-side and never throwing -
+  9 checks), Request Creation (5 checks), Edit (5 checks), Assignment
+  (5 checks), Status workflow (6 checks), Images (8 checks), Cancel
+  (3 checks), Authorization/organization isolation (11 checks, including
+  cross-org 404, System Admin 403, an unresolvable actor rendering
+  "Unknown user", pagination `limit`/`before` validation, and a
+  simulated activity-write failure never blocking the underlying Request
+  update), and a Regression sweep (22 checks covering existing
+  creation/status/edit/assignment/cancel/image-upload validation rules,
+  anti-enumeration behavior, SLA recalculation, and the image-storage
+  abstraction) - **74 of 74 assertions passed, 0 failed.**
+- **Backend module-graph verification**: `node -e "require('./src/app')"`
+  loads cleanly with the new model, service, and route wired in - no
+  circular dependency, no startup migration runs automatically.
+- **Frontend build verification**: `npx vite build` completed with no
+  errors.
+- **Known limitations**: (1) no real MongoDB was available in this
+  environment (same disclosed limitation as every prior ticket here) - the
+  suite above is a mocked-model verification of the real controller/
+  service logic, not a live-database integration test; the model's own
+  schema (required fields, enum, `timestamps`) was additionally verified
+  in isolation via real Mongoose schema validation (`validateSync()`,
+  no DB connection needed for that). (2) The optional backfill script
+  only ever creates `REQUEST_CREATED` - a historical Request's assignment/
+  status/priority history before this feature shipped is permanently
+  unrecoverable and intentionally never fabricated.
+
+## In-App Notifications (DOC-18)
+
+A per-recipient notification inbox - "what does THIS user need to know?" -
+layered on top of the existing Request lifecycle. Deliberately **not**
+email/SMS/push, **not** WebSockets, and **not** a rewrite or replacement of
+DOC-17's Request Activity Timeline ("what happened to this Request?") -
+the two answer different questions and are stored in two completely
+separate collections, written independently from the same successful
+controller transition.
+
+- **Timeline vs. Notification, precisely**: DOC-17's `RequestActivity` is
+  one shared, chronological, append-only record per Request, visible to
+  everyone currently authorized to view that Request. This ticket's
+  `Notification` is one row per **(event, recipient)** pair, visible ONLY
+  to that recipient, with its own independent read state. A single
+  business event (e.g. a Manager reassigning an Operator) writes exactly
+  one `RequestActivity` entry but may write up to three `Notification`
+  documents (Employee, previous Operator, new Operator). Neither is
+  generated FROM the other - both are written directly, once, from the
+  same successful transition (`recordRequestActivity(...)` and
+  `createRequestNotification(...)` called back-to-back at the same call
+  site - task spec section 34: "Do NOT read the Timeline collection after
+  every mutation just to decide notifications").
+- **Not every activity becomes a notification** (task spec section 5): a
+  title/description edit, a category change, and Before/Completion image
+  events never notify anyone in this version - only genuinely
+  "you-need-to-know-this" events do (see the recipient rules below).
+  "Notifications should be useful, not noisy."
+- **Model**: `models/Notification.js` - `{organizationId, recipientId,
+  actorId, requestId, type, title, message, metadata, readAt,
+  createdAt, updatedAt}`. `organizationId` is always derived server-side
+  from the already-authorized Request (or, for a hypothetical future
+  non-Request event, from `req.user.organizationId`) - never from
+  `req.body`/`req.query`/frontend state. `actorId`/`requestId` are
+  optional (`null`) for schema forward-compatibility with a future
+  non-Request or system-generated notification type - every type actually
+  implemented today always sets both. `readAt` is `null` while unread and
+  set to a real timestamp the moment the recipient marks it read (never a
+  plain Boolean - task spec section 12).
+- **Request identification (task spec section 10)**: DOC-63 "Human-
+  Friendly Request ID" does not exist yet, so no fake permanent request
+  number is ever invented here. A notification identifies its Request via
+  the real `requestId` plus a plain snapshotted `metadata.requestTitle`
+  string - if DOC-63 ships later, it can add a `requestNumber` to
+  `metadata` (already a free-form field for exactly this reason) with zero
+  schema change.
+- **Notification types implemented** (`Notification.NOTIFICATION_TYPES`,
+  schema-enforced enum, never arbitrary free text): `REQUEST_ASSIGNED`,
+  `REQUEST_REASSIGNED`, `REQUEST_UNASSIGNED`, `REQUEST_STATUS_CHANGED`
+  (used only for the open/reopened -> in_progress "work started"
+  notification), `REQUEST_RESOLVED`, `REQUEST_REOPENED`,
+  `REQUEST_CANCELLED`. **Deliberately NOT implemented in this version**
+  (task spec explicitly permits deferring all of these, each documented
+  here rather than silently omitted): `REQUEST_CLOSED` (see the Closed
+  rule below), `REQUEST_PRIORITY_CHANGED` (a priority edit is treated the
+  same as a minor field edit - not inherently notification-worthy, no
+  concrete recipient rule was given for it), `REQUEST_OVERDUE` (see SLA/
+  overdue below), `ROLE_CHANGED`/`PASSWORD_RESET_REQUIRED` (task spec
+  section 27 explicitly allows deferring these - Request notifications are
+  the ticket's priority, and touching `user.controller.js`'s role/password
+  code at all was judged an unnecessary scope/risk increase for this
+  Sprint), `USER_DEACTIVATED` (a deactivated user is immediately locked
+  out of login - DOC-48 - so an in-app notification would never actually
+  be seen by them; not useful).
+- **`notification.service.js`** - the sole owner of all Notification
+  writes and read-state changes; no controller calls
+  `Notification.create(...)`/mutates `readAt` directly anywhere. Exposes
+  exactly four functions: `createNotification` (the transport-layer
+  primitive - validates required fields, the type enum, and applies the
+  actor-exclusion safety net below), `createRequestNotification` (a thin
+  convenience wrapper deriving `organizationId`/`requestId` from an
+  already-saved Request document, mirroring `recordRequestActivity`'s own
+  ergonomics), `markNotificationRead` (idempotent, recipient-scoped),
+  `markAllNotificationsRead` (recipient-scoped bulk update). This service
+  deliberately does NOT decide who should be notified or build message
+  text - see the next point.
+- **Recipient decisions and message text live in the controller, not the
+  service** - the same place DOC-17's own metadata-building already lives,
+  right next to the already-resolved User/Category documents and old/new
+  values a given transition already has in hand. Unlike DOC-17 (which
+  never stores a finished sentence), storing a safe, already-built
+  `title`/`message` snapshot IS acceptable here (task spec section 11) -
+  a notification is read once, briefly, in a small dropdown, with no
+  future "reformat every historical notification" requirement the way a
+  longer-lived Timeline has.
+- **Actor-exclusion safety net** (task spec section 9: "Do NOT notify a
+  user about an action they themselves performed"): every call site in
+  this project is already written so a recipient never equals the actor
+  who caused the event (e.g. the Manager who assigns an Operator is never
+  one of the three possible recipients) - but `createNotification` ALSO
+  enforces this centrally as defense in depth: if `actorId` and
+  `recipientId` ever resolve to the same user, the notification is
+  silently skipped (`null`, not an error), never delivered.
+- **Recipient rules implemented**:
+  - **Assignment** (`assignRequestOperator` and
+    `managerUpdateRequest`'s assignment branch - both reach the identical
+    underlying transition through different routes): Employee (creator)
+    AND the newly-assigned Operator, always. An unrelated Operator never
+    receives anything.
+  - **Reassignment** (Operator A -> Operator B): Employee, Operator A
+    ("You were removed from a request"), AND Operator B ("A request was
+    assigned to you") - three notifications from one transition. The
+    Manager who performed it receives none (actor-exclusion).
+  - **Unassignment** (`managerUpdateRequest` removing an Operator with no
+    replacement): Employee AND the removed Operator only - never every
+    Operator in the Organization.
+  - **In Progress** (`open`/`reopened` -> `in_progress`): Employee only -
+    "Work started on your request" - judged useful (task spec section 21)
+    and implemented; fires only once, on the real transition (this
+    endpoint already rejects a same-status resubmission with 400 before
+    this code is ever reached, so no duplicate/no-op notification is
+    possible).
+  - **Resolved** (`in_progress` -> `resolved`): Employee only - REQUIRED
+    (task spec section 22). A Manager notification on resolve was
+    considered and deliberately NOT implemented - the Manager Dashboard's
+    own DOC-53 statistics already surface resolved-request counts, so an
+    individual push-style notification for every resolution was judged
+    unnecessary noise (task spec explicitly allows this as optional).
+  - **Reopened** (`resolved` -> `reopened`, Employee-only action): the
+    assigned Operator - REQUIRED (task spec section 23) - AND the
+    Organization's Manager (task spec section 8's own "good candidate" -
+    implemented, since a request regressing after being marked resolved
+    is a genuinely meaningful organization-level event). The Employee who
+    performed the reopen is never notified about their own action.
+  - **Closed** (`updateRequestStatus`'s closed branch AND
+    `managerCloseRequest` alike): **deliberately silent, no notification
+    at all** - the documented rule task spec section 24 asks for. By the
+    time a Request reaches `closed`, the Employee (who either closed it
+    themselves or already saw it resolved) and the Operator (who already
+    received the resolved-time notification) already know the Request's
+    lifecycle is complete - a further notification would be redundant
+    noise, not new information.
+  - **Cancelled** (`managerCancelRequest` - the only cancellation path
+    that ever notifies anyone; Employee self-cancel via `cancelMyRequest`
+    is only reachable while open+unassigned, so there is never an Operator
+    to notify and the Employee is the actor of their own cancellation):
+    Employee AND the assigned Operator (if one exists) - REQUIRED (task
+    spec section 25). `metadata.cancelReason` is included safely - both
+    recipients can already see this exact same field on this exact same
+    Request's own response shape (`sanitizeRequest`), so repeating it in
+    the notification exposes nothing new.
+  - **System Admin**: never a possible recipient of any Request
+    notification (task spec section 8/37) - structurally true because
+    System Admin never creates, is assigned to, or manages any individual
+    Request at all; no special-case check was needed anywhere in the
+    controller to enforce this.
+- **SLA / Overdue - explicitly deferred** (task spec section 26): this
+  project has never added a background scheduler (see `utils/slaPolicy.js`'s
+  own long-standing "Do not add background schedulers" scope note, `isOverdue`
+  is always computed dynamically at read time, never persisted) - and DOC-18
+  does not introduce one either. A `REQUEST_OVERDUE` notification requires
+  a genuine trigger (a periodic sweep, or a lazy check on some other
+  request) that does not exist in this codebase today. Rather than
+  half-implement a fragile lazy-trigger (which risks either missing
+  overdue Requests no one happens to view, or firing duplicate
+  notifications on every view), this version makes **no claim** of overdue
+  alerting - there is no `REQUEST_OVERDUE` type, and the Manager Dashboard
+  does **not** receive an overdue-Request notification in this Sprint. A
+  future ticket introducing a real scheduled job (or confirming a safe
+  lazy-trigger design) is the correct place to add this, cleanly, without
+  DOC-18 pretending a trigger exists when it does not.
+- **API endpoints** (`routes/notification.routes.js`, same auth chain as
+  `chat.routes.js`: `verifyToken -> requirePasswordChangeCompleted ->
+  requireOrganizationMembership -> requireActiveOrganization` - the last
+  two structurally exclude System Admin, since its own `organizationId` is
+  always `null`):
+  - `GET /api/notifications?limit=<1-100>&before=<id>` - the caller's own
+    notifications, **newest-first** (task spec section 14 - the opposite
+    reading order from DOC-17's own Timeline, a deliberate, documented
+    difference: a Timeline reads top-to-bottom as history; an inbox reads
+    top-to-bottom as "what's new"). `limit`/`before`-by-id cursor
+    pagination mirrors DOC-17's own endpoint shape exactly (`before` must
+    itself be a notification id already belonging to this recipient -
+    never a bare timestamp, so it can never be used to probe another
+    user's notification timing). Response: `{status, data: [...], meta:
+    {hasMore, nextCursor}}`.
+  - `GET /api/notifications/unread-count` - `{unreadCount}`, counting only
+    `recipientId === req.user.userId AND readAt === null` within the
+    caller's own organization - the client can never supply/override
+    `recipientId`.
+  - `PATCH /api/notifications/:id/read` - only the recipient may mark
+    their own notification read; idempotent (a second call for an
+    already-read notification succeeds without changing `readAt`);
+    another user (even in the same Organization) gets 404, never a 403
+    that would confirm the notification's existence.
+  - `PATCH /api/notifications/read-all` - only ever affects the caller's
+    own notifications, returns `{modifiedCount}`.
+  - No `DELETE` endpoint exists (task spec section 13 - not required this
+    Sprint, and historical notifications are treated the same "prefer
+    preserving history" way this project already treats `RequestActivity`
+    - immutable after creation, no user-facing edit/delete of the
+    title/message/metadata fields either).
+- **Failure strategy**: identical, documented choice to DOC-17's own
+  `requestActivity.service.js` - the underlying Request/business write is
+  always primary and never rolled back or blocked by a notification
+  failure; every notification write happens AFTER the business write
+  already succeeded and swallows its own errors (`console.error`, never
+  throws). The same rejection of MongoDB multi-document transactions
+  applies for the same standalone-`mongod`-compatibility reason.
+- **Indexes**: `{recipientId: 1, createdAt: -1}` (the notification LIST
+  query) and `{recipientId: 1, readAt: 1, createdAt: -1}` (the unread-
+  count/unread-list query) - both lead with `recipientId` since every real
+  query this feature runs is scoped to one recipient's own inbox. No
+  separate `organizationId`-only index was added (task spec: "do not add
+  excessive indexes" - no query here is ever organization-wide, only
+  recipient-scoped with organizationId as defense-in-depth).
+- **Historical Requests**: no backfill of any kind exists or is planned
+  for notifications (task spec section 35 - unlike DOC-17's own OPTIONAL,
+  narrowly-scoped `REQUEST_CREATED` backfill) - a Request's history before
+  DOC-18 shipped simply has zero historical notifications, and none are
+  ever fabricated. This is not considered a gap: notifications are
+  inherently forward-looking ("what do you need to know, going forward"),
+  unlike a Timeline, which is inherently a historical record.
+- **Test summary**: a temporary mocked-controller test harness
+  (`backend/__doc18_test.js`, deleted after this run), extending DOC-17's
+  own established harness (fake in-memory `Request`/`ServiceCategory`/
+  `User`/`RequestActivity`/`Notification` models + a fake
+  `requestImageStorage`, injected directly into Node's `require.cache`
+  before requiring the REAL, unmodified `controllers/request.controller.js`,
+  `controllers/notification.controller.js`, `services/requestActivity.service.js`,
+  and `services/notification.service.js`). Covered: Model/Service (schema
+  validation, actor-exclusion self-notification guard, unrecognized-type
+  guard - 10 checks), Assignment (6 checks), Reassignment (5 checks),
+  Status workflow (7 checks, including the documented "closed is silent"
+  rule and "rejected transition creates nothing"), Read state (7 checks,
+  including idempotent mark-read and "another user cannot mark read"),
+  Pagination (4 checks, including cross-recipient cursor rejection),
+  Organization isolation (4 checks, including a direct notification-id
+  guessing attack), a dedicated DOC-17 regression pass (5 checks
+  confirming the Timeline still records exactly one activity per action
+  and is never duplicated by a notification write), and a general
+  regression pass (10 checks covering creation/status/edit/assignment/
+  cancel validation, anti-enumeration, a simulated notification-write
+  failure never blocking the underlying Request update, and response-shape
+  safety) - **53 of 53 assertions passed, 0 failed.**
+- **Backend module-graph verification**: `node -e "require('./src/app')"`
+  loads cleanly with the new model, service, controller, and route wired
+  in - no circular dependency, no startup migration or scheduler runs
+  automatically.
+- **Frontend build verification**: `npx vite build` completed with no
+  errors.
+- **Known limitations**: (1) no real MongoDB was available in this
+  environment (same disclosed limitation as every prior ticket here) - the
+  suite above is a mocked-model verification of the real controller/
+  service logic, not a live-database integration test; the model's own
+  schema was additionally verified in isolation via real Mongoose schema
+  validation (`validateSync()`, no DB connection needed). (2) No overdue-
+  SLA notification exists in this version - see "SLA / Overdue" above.
+  (3) No `ROLE_CHANGED`/`PASSWORD_RESET_REQUIRED` notifications exist in
+  this version - see "Notification types implemented" above. (4) There is
+  no way for a user to permanently delete an old notification in this
+  Sprint (by design, matching this project's "prefer preserving history"
+  posture) - an inbox will grow over time; a future ticket could add
+  either a bulk "clear read notifications" action or a retention policy if
+  this becomes a real product need.
+
+## Request Number / Human-Friendly ID (DOC-16)
+
+A stable, human-friendly Request identifier (`REQ-000001`) shown to every
+role alongside MongoDB's own `_id` - `_id` remains the sole internal
+database identifier everywhere in this project (routing, foreign keys,
+authorization); `requestNumber` is purely presentation metadata layered on
+top of it.
+
+- **`_id` vs. `requestNumber`, precisely**: `id` (the raw ObjectId,
+  unchanged) is what the frontend still uses for every API call and every
+  foreign key (`RequestActivity.requestId`, `Notification.requestId`,
+  Comment's own request reference, image storage object keys) - none of
+  those were touched by this ticket. `requestNumber` is a NEW, separate,
+  purely display-oriented field - a user reading `REQ-000123` can never use
+  it to bypass authorization (see "Security" below).
+- **Format**: `REQ-` + the sequence number zero-padded to 6 digits
+  (`REQ-000001` ... `REQ-999999`). A sequence beyond 999999 simply produces
+  a longer numeric portion (`REQ-1000000`) rather than truncating or
+  wrapping - this project has no realistic path to seven-digit Request
+  volume; this is a defensive, not a functional, consideration. Uppercase,
+  fixed prefix, immutable once assigned, generated server-side only - the
+  frontend can never supply or edit it (`createRequest` never reads
+  `body.requestNumber`; the schema field is also `immutable: true`,
+  defense in depth).
+- **Global, not per-Organization sequence**: one shared counter
+  (`{key: 'request', seq}`) across the whole system, not one per
+  Organization. Chosen deliberately (this ticket's own stated preference):
+  simpler, no duplicate visible IDs across Organizations, easier
+  cross-Organization support/debugging, and no need to combine an
+  Organization code into every identifier. This is orthogonal to and does
+  not weaken DOC-38's own Organization-isolation boundary anywhere - that
+  boundary is still enforced entirely by `organizationId`, never by
+  `requestNumber`. A future org-scoped identifier could reuse the exact
+  same generic `Counter` collection with a different `key`, without
+  disturbing any already-assigned, immutable `requestNumber`.
+- **Atomic counter architecture**: `models/Counter.js` - a small, generic
+  `{key, seq}` collection (not `RequestCounter` - intentionally reusable by
+  any future feature needing its own atomic sequence, via a different
+  `key`). `services/requestNumber.service.js` is the sole owner of turning
+  it into a formatted `requestNumber`:
+  - `getNextRequestNumber()` - a single atomic
+    `Counter.findOneAndUpdate({key}, {$inc:{seq:1}}, {new:true, upsert:true})`.
+    MongoDB guarantees single-document writes are atomic even on this
+    project's own standalone (non-replica-set) `mongod` (see
+    `config/db.js` - no transaction/session setup exists or is needed here,
+    unlike the multi-document-write cases DOC-17/DOC-18 deliberately avoid
+    making atomic). `upsert: true` means the very first call ever made
+    creates the counter automatically, starting at `seq: 1` - no separate
+    seed/bootstrap step. Never `Request.countDocuments() + 1` or "last
+    Request + 1" - both are unsafe read-then-write races.
+  - `ensureCounterAtLeast(minimumSeq)` - MIGRATION-ONLY, never used by live
+    Request creation. Deliberately a simple read-then-conditionally-write
+    (not a single atomic operation) - safe only because it is exclusively
+    invoked by the manual, one-time migration script against a quiescent
+    database. A naive atomic-looking
+    `findOneAndUpdate({key, seq:{$lt:minimumSeq}}, {$set:{seq:minimumSeq}}, {upsert:true})`
+    was deliberately NOT used - if the counter already exists with
+    `seq >= minimumSeq`, the filter matches nothing, and `upsert: true`
+    would then attempt to INSERT a second document, colliding with the
+    existing unique `key` index. The safe read-then-write version avoids
+    this entirely.
+- **Sequence gaps are acceptable, duplicates are NOT (documented policy)**:
+  `requestNumber` is allocated after every other validation/duplicate-
+  detection check in `createRequest` has already passed, but before
+  `Request.create()` runs - if allocation itself fails, no number was ever
+  wasted on a Request that was never going to be created; if
+  `Request.create()` fails AFTER a number was allocated, that exact number
+  is simply never reused (`REQ-000101`, `REQ-000103` is a normal, expected
+  outcome if 102's save failed) - uniqueness is the only guarantee this
+  project makes, continuity is explicitly not one.
+- **Request schema**: `requestNumber: {type: String, unique: true,
+  sparse: true, immutable: true, trim: true, default: null}`. NOT
+  `required: true` - Mongoose's `required` validator only runs on save,
+  never retroactively against already-persisted documents, so every
+  historical, pre-DOC-16 Request remains fully readable with zero startup
+  migration (the same "COMPATIBILITY POLICY" pattern this project already
+  established for `slaDueAt`/`slaPolicyHours`, DOC-55). `unique + sparse`
+  together (not `unique` alone) is what allows many historical documents to
+  simultaneously lack the field without violating uniqueness - MongoDB
+  indexes a missing field as `null`, and a plain non-sparse unique index
+  would incorrectly reject every Request after the first one missing it.
+- **Creation flow failure handling**: if `getNextRequestNumber()` itself
+  fails, Request creation is aborted safely (any already-uploaded S3/GridFS
+  images for this attempt are cleaned up, matching this endpoint's existing
+  rollback pattern) - a Request is never silently created without a
+  `requestNumber` once this feature is active. If `Request.create()` then
+  fails with a MongoDB duplicate-key error (code 11000) specifically on the
+  `requestNumber` index (should not happen in practice - the counter is
+  atomic and monotonically increasing - but handled defensively), the
+  client receives a safe, generic message; the raw MongoDB error is never
+  exposed.
+- **API responses**: `requestNumber` is included in `sanitizeRequest` (the
+  one shared response shape every list/detail endpoint already reuses -
+  `GET /requests`, `GET /requests/:id`, `GET /requests/assigned`,
+  `GET /requests/organization`, and every mutation response that already
+  returns a Request) - `null` for a not-yet-migrated historical Request.
+  `id` (the raw ObjectId) is still always included too - the frontend still
+  needs it for API routing (task spec: "do not remove `_id` if internal
+  frontend behavior depends on it"). The DOC-58 duplicate-detection
+  candidate shape also now includes each candidate's own `requestNumber`.
+- **Frontend display**: `RequestNumberBadge.jsx` - a small sibling to
+  `RequestStatusBadge.jsx`/`RequestSlaBadge.jsx`, rendering nothing at all
+  for a `null` `requestNumber` (the title alone is shown, exactly as before
+  this ticket). Displayed inline within the existing title table cell in
+  `RequestRow.jsx` (Employee + Operator dashboards) and
+  `ManagerRequestRow.jsx` (Manager dashboard) - not as a new dedicated
+  column, which would also require updating each table's `<thead>` and the
+  expanded detail row's `colSpan`, a larger, riskier change than this
+  ticket needs. Also shown in the DOC-58 duplicate-request confirm dialog.
+  Raw ObjectIds were never displayed to any user anywhere in this project
+  before this ticket (confirmed via a full frontend audit) - this feature
+  is purely additive, not a fix for an existing leak.
+- **Search**: `utils/requestQueryBuilder.js`'s existing `q` parameter's
+  `$or` array (previously `[title, description]`) now also includes
+  `requestNumber`, reusing the exact same case-insensitive,
+  regex-escaped SUBSTRING match already established for title/description
+  - no new query parameter, no special-casing. Searching the full
+  `REQ-000123` matches exactly; searching a bare fragment like `000123`
+  ALSO matches (a plain substring match), which is the same predictable
+  "contains" semantics this search box already has for title/description -
+  a deliberate, documented choice for consistency, not a numeric-specific
+  rule. A historical Request with no `requestNumber` yet simply never
+  matches this clause. Sorting was NOT extended to `requestNumber` -
+  existing sort behavior (`createdAt`/`updatedAt`/`priority`/`status`/
+  `title`/`slaDueAt`) is unaffected, per the task spec's "not required if
+  it complicates current business sorting."
+- **DOC-58 Duplicate Detection**: unaffected - still entirely
+  title/category-based (EXACT/CONTAINS/OVERLAP normalized-title
+  comparison). `requestNumber` is never used for duplicate matching; each
+  duplicate Request created via "Create Anyway" still gets its own unique
+  `requestNumber`.
+- **DOC-55 SLA**: unaffected - `requestNumber` has no relationship to
+  `createdAt`/`slaDueAt`/`slaPolicyHours`; the migration script never
+  recalculates or touches any SLA field.
+- **DOC-56/GridFS/S3 image storage**: unaffected - attachment storage
+  continues referencing the internal Request `_id`; no image path/key was
+  renamed because of this ticket.
+- **DOC-13 Comments**: unaffected - Comments continue referencing
+  `requestId` (the internal id); only human-facing UI may display
+  `requestNumber`.
+- **DOC-18 Notifications**: notification message TEXT now prefers
+  `Request REQ-000123` over the pre-DOC-16 `"${title}"` quoted-title shape
+  (a small shared `requestNotificationLabel(requestDoc)` helper in
+  `request.controller.js`, used at every one of the existing DOC-18
+  message call sites - assignment, reassignment, unassignment, work
+  started, resolved, reopened, cancelled), falling back to the quoted
+  title for a historical Request without a `requestNumber` yet. The
+  notification's own `requestId` field (internal FK, used for
+  navigation/authorization) is completely unchanged - still always the
+  real ObjectId, never replaced by `requestNumber` (task spec: "do NOT
+  replace requestId foreign-key behavior - requestNumber is presentation
+  metadata").
+- **DOC-17 Request Activity Timeline**: unaffected - `RequestActivity`'s
+  own foreign keys were never touched, and `RequestActivityTimeline.jsx`
+  does not display Request identity at all today (it only shows individual
+  event descriptions like "Assigned to X" within an already-expanded row
+  that shows the title/requestNumber at the row level) - so there was
+  nothing to change here, and `requestNumber` was deliberately NOT
+  duplicated into every timeline record (task spec: "do not duplicate
+  requestNumber into every timeline record unless there is a real snapshot
+  requirement" - there is not one here).
+- **Security - human-friendly IDs are NEVER an authorization mechanism**:
+  sequential numbers are inherently guessable. Knowing `REQ-000123` grants
+  a user precisely nothing - every Request access path continues to run
+  through the exact same authenticated-user + Organization-isolation +
+  Request-access-rule chain as before this ticket, entirely independent of
+  whether the caller knows a Request's `requestNumber`. No new
+  `GET /requests/by-number/:requestNumber` (or similar) endpoint was
+  added - the task spec explicitly prefers not adding one unless required,
+  and no existing feature needed it. System Admin gains no new operational
+  Request visibility through this ticket.
+- **Migration script (optional, manual)**: `npm run migrate:request-numbers`
+  (`scripts/migrateRequestNumbers.js`) - backfills `requestNumber` on every
+  historical Request currently missing it. Ordered `createdAt` ascending,
+  `_id` ascending as a tie-breaker (older Requests get lower numbers).
+  Never runs automatically on server startup. Never overwrites a Request
+  that already has a `requestNumber`. Never touches SLA or any other
+  business field. Idempotent - a second run changes nothing, migrates
+  nothing, and (because `ensureCounterAtLeast` only ever writes when the
+  counter is genuinely behind) advances the counter zero additional times.
+  After migrating, the shared counter is advanced to at least the TRUE
+  maximum `requestNumber` across the entire Request collection (not merely
+  the numbers this run happened to assign) - a small extra safety margin
+  beyond the task spec's own minimum ask, so the very next NEW Request
+  always continues the sequence correctly even if the counter and the
+  Request collection were ever out of sync for any reason. A document that
+  fails to save is reported (id + reason), left completely untouched, and
+  is safely picked up (with a freshly-allocated number, never a reused
+  one) the next time the script runs.
+- **Test summary**: a temporary mocked test harness
+  (`backend/__doc16_test.js`, deleted after this run) with fake in-memory
+  `Counter`/`Request` stores injected directly into Node's `require.cache`
+  before requiring the REAL, unmodified `services/requestNumber.service.js`,
+  `scripts/migrateRequestNumbers.js`, `controllers/request.controller.js`,
+  and `utils/requestQueryBuilder.js`. Covered: Model/Counter (8 checks -
+  format/padding, atomic upsert-on-first-call, monotonic uniqueness,
+  sequence-gap-never-repaired, `ensureCounterAtLeast`'s create/never-
+  downgrade behavior, and a static schema/source-scan confirming
+  `unique`+`sparse`+`immutable` and that the frontend can never supply
+  `requestNumber`), Concurrency (4 checks - 10 concurrent allocations all
+  unique, all format-valid, covering exactly `REQ-000001`..`REQ-000010`
+  with no gaps/collisions, plus one check that explicitly DISCLOSES this
+  mock cannot prove real MongoDB write atomicity - see Known limitations),
+  Migration (9 checks - full backfill, skip-already-numbered, createdAt-
+  ascending ordering, `_id` tie-break, field preservation, SLA
+  untouched, counter correctly continues past the TRUE collection-wide
+  maximum after migration, idempotent rerun, and a partial-failure case
+  that leaves the failed Request unnumbered without blocking the rest or
+  ever duplicating its allocated number), API response shape (6 checks -
+  `requestNumber` present/`null`-fallback in `sanitizeRequest`, full
+  pre-DOC-16 response shape regression, `sanitizeRequest` reuse breadth,
+  duplicate-candidate shape, and the duplicate-key-11000 safe-error-message
+  path), Search (5 checks - full-number match, bare-fragment substring
+  match, title/description regression, combined `$or` correctness, and
+  role/Organization base-scope preservation), Notification integration (5
+  checks - label preference, historical fallback, non-empty regression,
+  every message call site converted, and the internal `requestId` FK
+  regression), Timeline integration (5 checks, all static/regression -
+  `recordRequestActivity` call sites intact, the Timeline component
+  deliberately unchanged, `RequestActivity`/its service untouched, the
+  DOC-17 endpoint handler unrenamed, and the Timeline still keyed by
+  internal `id` never `requestNumber`), and full regression/module-load (6
+  checks - Counter/Request/migration-script/controller/routes all load
+  cleanly, and a static check confirming no `by-number` lookup route was
+  added) - **48 of 48 assertions passed, 0 failed.**
+- **Backend module-graph verification**: `node -c` syntax-checked every
+  modified/new file individually
+  (`controllers/request.controller.js`, `models/Request.js`,
+  `models/Counter.js`, `services/requestNumber.service.js`,
+  `utils/requestQueryBuilder.js`, `scripts/migrateRequestNumbers.js`,
+  `app.js`, `routes/request.routes.js`) - all passed. The test harness
+  above additionally required `app.js`, both Request/Notification route
+  files, and the full controller dependency graph directly (Category H) -
+  no circular dependency, no startup migration or scheduler runs
+  automatically, zero new routes were registered.
+- **Frontend build verification**: `npx vite build` completed with no
+  errors (69 modules transformed).
+- **Known limitations**: (1) no real MongoDB was available in this
+  environment (same disclosed limitation as every prior ticket here) - the
+  concurrency test above proves `getNextRequestNumber()`'s OWN LOGIC is
+  correct (called N times, in-memory, it produces N unique sequential
+  results); it does NOT independently re-verify MongoDB's own
+  `findOneAndUpdate` atomicity guarantee under genuine concurrent writes
+  from multiple real connections/processes - that guarantee is
+  well-established, documented MongoDB behavior (single-document writes
+  are atomic even on a standalone `mongod`), relied upon here but not
+  reproven by a mock, exactly as the task spec itself anticipates ("If real
+  MongoDB isn't available, disclose the limitation"). (2) `requestNumber`
+  sorting was not added to Request search/filter/sort (see "Search"
+  above) - deliberately out of scope, not a bug. (3) The optional
+  migration script was exercised only against the mocked test harness
+  above, never against a real MongoDB instance, for the same reason as
+  (1).
+
+## Advanced Request History & Reassignment (DOC-15)
+
+Extends DOC-17's existing Request Activity Timeline with an auditable
+reassignment/unassignment workflow. Deliberately does NOT replace DOC-17,
+does NOT introduce a second competing history collection, and does NOT
+redesign Request assignment from scratch - it extends the two pre-existing
+assignment endpoints in place.
+
+- **Audit findings (before any code changed)**: two independent,
+  overlapping endpoints already implemented assignment logic -
+  `PATCH /:id/assign` (`assignRequestOperator`) and `PATCH /:id/manager`
+  (`managerUpdateRequest`, DOC-59's combined priority/category/operator
+  edit endpoint). Both already recorded DOC-17 `ASSIGNED`/`REASSIGNED`/
+  `UNASSIGNED` activity with basic operator name metadata, both already
+  sent DOC-18 notifications, both were already restricted to
+  `status === 'open'` only, and both already rejected reassigning to the
+  identical currently-assigned operator as a no-op (DOC-22, pre-existing,
+  not new here). Removing either endpoint would violate "do not redesign
+  assignment from scratch"; extending only one would let the other bypass
+  the new reason requirement entirely - so DOC-15 extends BOTH, in
+  parallel, with byte-for-byte-identical reason-enforcement rules, rather
+  than consolidating them into one.
+- **Backend determines the operation, never the client**: the request body
+  is simply `{operatorId, reason}` (`operatorId` may be a valid ObjectId
+  string, or explicit `null` for unassignment; `reason` is optional/ignored
+  unless the classification below requires it). The controller classifies
+  ASSIGNED vs. REASSIGNED vs. UNASSIGNED purely by comparing `operatorId`
+  against the Request's OWN current `assignedOperatorId` (server-side,
+  trusted) - the frontend can never claim "this is a reassignment" and can
+  never send `previousOperatorId`, `actorId`, `organizationId`, activity
+  `type`, or `createdAt`; all of those are derived server-side.
+  - No current operator + `operatorId` → **ASSIGNED** (first assignment;
+    `reason` ignored even if sent).
+  - Current operator + a DIFFERENT `operatorId` → **REASSIGNED**
+    (`reason` required).
+  - Current operator + `operatorId: null` → **UNASSIGNED** (`reason`
+    required).
+  - Current operator + the SAME `operatorId` → rejected as a no-op before
+    any reason validation, `RequestActivity`, or `Notification` is ever
+    touched (DOC-22, preserved unchanged).
+- **Reason validation** - `utils/requestFieldValidation.js`'s new
+  `validateAssignmentReason`, deliberately mirroring the project's existing
+  `validateCancelReason` (DOC-59) bounds exactly: required, must be a
+  string, trimmed, `3`-`500` characters, whitespace-only rejected. Never
+  exposes a raw Mongoose/MongoDB validation error to the client - always a
+  generic, safe message. Enforced identically in both
+  `assignRequestOperator` and `managerUpdateRequest`.
+- **Status gating - preserved exactly, no new transitions invented**: the
+  audit above found assignment/reassignment/unassignment were ALL already
+  restricted to `status === 'open'` in both pre-existing endpoints; DOC-15
+  changes nothing here - an `in_progress`/`resolved`/`closed`/`cancelled`
+  Request still cannot be assigned, reassigned, or unassigned, exactly as
+  before this ticket.
+- **Operator validation - unweakened**: the existing eligibility query
+  (same Organization, `role === 'operator'`, `active`, `specialties`
+  containing the Request's `category`) is completely unchanged. DOC-15
+  adds zero new bypass paths - an ineligible operator is rejected with the
+  same generic error as before, before reason validation is ever reached.
+- **`RequestActivity.metadata` shape** (a pre-existing free-form Mongoose
+  `Mixed` field - no schema migration needed):
+  - `ASSIGNED`: `{newOperatorId, newOperatorName}` - unchanged from
+    pre-DOC-15 (a first assignment has no previous operator or reason to
+    record).
+  - `REASSIGNED`: `{previousOperatorId, previousOperatorName,
+    newOperatorId, newOperatorName, reason}` - extended with `reason` and
+    explicit `previousOperatorId`/`newOperatorId` (previously name-only).
+  - `UNASSIGNED`: `{previousOperatorId, previousOperatorName, reason}` -
+    extended with `reason`.
+  - Only id + display-name snapshots are ever stored - never a full `User`
+    document, never an email, never a password. Storing the display-name
+    snapshot (not just the id) is deliberate, for timeline readability even
+    if the operator's name/status later changes - the task spec explicitly
+    accepts this trade-off.
+- **Notifications (DOC-18) - reason is deliberately NEVER included in
+  message text.** All three existing notification recipients/triggers are
+  unchanged (Employee always notified; new Operator always notified;
+  previous Operator notified only on a genuine reassignment, never on a
+  first assignment). The reassignment/unassignment `reason` lives ONLY in
+  `RequestActivity.metadata`, visible on the Timeline - not duplicated into
+  notification text. This was a deliberate choice (task spec's own stated
+  preference), not an oversight: a reassignment reason ("Ahmad is
+  unavailable") can reference sensitive operational/performance context
+  that is appropriate for a Manager-visible audit trail but not necessarily
+  for a push-style notification the affected Operator/Employee receives.
+  `requestNotificationLabel()` (DOC-16) is still used at every call site
+  unchanged, so messages continue reading "Request REQ-000123 ...".
+- **SLA (DOC-55) - untouched by design**: reassignment/unassignment never
+  writes `createdAt`, `slaDueAt`, or `slaPolicyHours`. Verified explicitly
+  in the test suite (Category F) - the SLA clock never resets on
+  reassignment.
+- **Status - never silently changed**: DOC-15 does not alter
+  `Request.status` as a side effect of assignment/reassignment/
+  unassignment - this matches the pre-existing, audited behavior; no new
+  status transition was invented.
+- **Images (DOC-56) / Comments (DOC-13) - untouched**: reassignment never
+  deletes or alters Before/Completion Images (`uploadedBy` metadata
+  preserved) or Comments; no automatic comment is inserted for an
+  assignment change - the Timeline entry is the sole record.
+- **Audit immutability**: once a `REASSIGNED`/`UNASSIGNED` activity is
+  created, there is no endpoint that can edit its `reason` or any other
+  field afterward - history remains strictly append-only, exactly like
+  every other DOC-17 activity type.
+- **Failure strategy - unchanged from DOC-17/DOC-18's existing best-effort
+  pattern**: the assignment/reassignment/unassignment business operation
+  (updating `assignedOperatorId`) is primary; `RequestActivity` creation and
+  `Notification` creation remain secondary, best-effort side effects - a
+  failure to write the Timeline entry or send a notification never causes
+  the assignment operation itself to be reported as failed to the client.
+  No new transaction architecture was introduced.
+- **Authorization**: unchanged - only the Request's own Organization's
+  Manager may assign/reassign/unassign; Employee, Operator, and System
+  Admin are all rejected (role check, pre-existing); a Manager from a
+  different Organization is rejected (Organization-isolation check,
+  pre-existing). DOC-15 adds no new authorization surface - it only adds
+  validation (`reason`) on top of the exact same authorization gate both
+  endpoints already had.
+- **Test summary**: a temporary mocked test harness
+  (`backend/__doc15_test.js`, deleted after this run) with fake in-memory
+  `Request`/`User`/`ServiceCategory` stores and fake `requestActivity.service`/
+  `notification.service` spies injected into Node's `require.cache` before
+  requiring the REAL, unmodified `request.controller.js`. Covered: First
+  Assignment (7 checks), Reassignment including reason edge cases - empty/
+  whitespace-only/too-short/too-long/valid (14 checks), Same-Operator
+  no-op rejection (4 checks), Unassignment including reason edge cases (9
+  checks), Operator validation - inactive/wrong-specialty/wrong-role/
+  cross-org (8 checks), Status-gating regression across all non-`open`
+  statuses (6 checks), Authorization/role/Organization-isolation (3
+  checks), `managerUpdateRequest` parity with `assignRequestOperator` (7
+  checks), DOC-16 `requestNumber` integration (4 checks), audit
+  immutability/failure-strategy/notification-reason-exclusion (3 checks),
+  and full regression/module-load (7 checks) - **72 of 72 assertions
+  passed, 0 failed.**
+- **Backend module-graph verification**: `node -c` syntax-checked
+  `controllers/request.controller.js` and `utils/requestFieldValidation.js`
+  individually - both passed; `app.js` and the full controller dependency
+  graph load cleanly (see "Backend verification" below).
+- **Known limitations**: (1) no real MongoDB was available in this
+  environment (same disclosed limitation as every prior ticket here) - the
+  mocked harness proves the controller's OWN logic (classification, reason
+  enforcement, metadata shape, notification/timeline call sites) is
+  correct; it does not independently reprove MongoDB's own read/write
+  guarantees. (2) The optional "Assignment History" view (task spec section
+  18) was not built as a separate UI - the existing
+  `RequestActivityTimeline.jsx` (extended, not replaced) already serves
+  this purpose by filtering to `ASSIGNED`/`REASSIGNED`/`UNASSIGNED` events
+  inline; a dedicated standalone view was judged unnecessary scope beyond
+  what the ticket requires.
+
+## Request Reports & CSV Export (DOC-67)
+
+Manager-only CSV export of Organization Requests, reusing DOC-54's existing
+search/filter/sort query logic exactly - not a second, competing reporting
+system.
+
+- **Audit findings**: DOC-54's `buildRequestQuery` (`utils/requestQueryBuilder.js`)
+  already centralizes every filter (`q`, `status`, `priority`, `categoryId`,
+  `assignedOperatorId`, `createdBy`, `createdFrom`/`createdTo`, sort) behind
+  one function, shared by `listMyRequests`/`listOrganizationRequests`/
+  `listAssignedRequests`. DOC-53's statistics endpoints are entirely
+  separate and untouched. This ticket adds a fourth caller of the exact
+  same helper rather than building a parallel filter implementation.
+- **Endpoint**: `GET /api/requests/organization/export`, registered
+  immediately alongside `GET /api/requests/organization` in
+  `routes/request.routes.js`, ahead of the blanket Employee-only gate (same
+  reason as every other Manager-only pre-gate route on this router). Query
+  parameters are the identical DOC-54 vocabulary (`q`, `status`, `priority`,
+  `categoryId`, `assignedOperatorId` including `"unassigned"`, `createdBy`,
+  `createdFrom`/`createdTo`, `sortBy`/`sortOrder`) - e.g.
+  `GET /api/requests/organization/export?status=open&priority=high&q=network`.
+- **Authorization**: `requireRole('manager')` + `requireOrganizationMembership`
+  + `requireActiveOrganization` - the exact same three-part chain
+  `GET /organization` already uses. Employee/Operator/System Admin tokens
+  never reach the controller at all. `organizationId` is read only from
+  `req.user.organizationId` (the authenticated Manager's own, DB-verified
+  Organization) - never from the query string or body; the controller's
+  `baseQuery` hardcodes it as the very first key, exactly like
+  `listOrganizationRequests`.
+- **DOC-54 consistency (critical, explicitly verified in tests)**: the
+  export handler calls `buildRequestQuery`/`fetchSortedRequests`/
+  `buildRequestEnrichmentMaps`/`buildCreatorMap` - the SAME functions,
+  called the SAME way, as `listOrganizationRequests` - so the normal
+  Manager list and the exported CSV return the identical logical Request
+  set for identical filters. There is no second query-interpretation layer
+  anywhere in this feature.
+- **CSV columns** (in order): Request Number, Title, Employee, Operator,
+  Category, Priority, Status, Created At, Updated At, SLA Due At, SLA
+  Status, Resolved At, Closed At, Cancellation Reason. Deliberately
+  excludes: raw MongoDB ObjectId as a primary identifier, password/
+  passwordHash/JWT, organization internal id, S3 objectKey/GridFS fileId/
+  image binary, Comments, and full RequestActivity history - this is a
+  high-level Request report, not an attachment or audit-log export.
+- **RequestNumber (DOC-16)**: `requestNumber || 'N/A'` - a historical
+  Request without one yet exports safely with the neutral fallback, never
+  the raw ObjectId.
+- **User/Operator/Category population**: human-readable names only -
+  `createdBy.fullName` (Employee), `assignedTo.fullName` (Operator, or
+  `'Unassigned'` if none), Category `name` - never an id. A reference that
+  can no longer be resolved (deleted/unreachable, defensive-only - Users
+  and Categories are never hard-deleted in this project) exports
+  `'Unknown User'`/`'Unknown Category'` rather than crashing the export.
+- **SLA integration (DOC-55) - no second calculation**: `SLA Due At` reuses
+  `computeSlaSummary`'s own `dueAt`. `SLA Status` is a new, six-value
+  export-specific classification (`on_track`/`due_soon`/`overdue`/
+  `completed_on_time`/`completed_late`/`unavailable`) added to
+  `utils/slaPolicy.js` as `classifyExportSlaStatus` - a thin wrapper around
+  the EXISTING `classifySlaBucket` (on_track/due_soon/overdue/unavailable
+  pass through unchanged) that only further splits its `'completed'`
+  bucket into on-time/late, reusing the EXACT SAME `resolvedAt <=
+  slaDueAt` comparison `utils/requestStatistics.js` already uses for SLA
+  compliance - never a second, independent SLA implementation. Falls back
+  to `closedAt`, then `cancelledAt`, when `resolvedAt` is absent (e.g. a
+  cancelled Request); defaults to `completed_late` in the (should-not-occur)
+  case none of the three exist, a deliberately conservative choice - an
+  indeterminate row is flagged for review rather than silently marked
+  compliant.
+- **CSV escaping**: `utils/csvExport.js`'s `escapeCsvField` - RFC 4180
+  rules (a field containing a comma, double quote, or any newline is
+  wrapped in double quotes, with embedded double quotes doubled). No
+  third-party CSV library was added (none was already a project
+  dependency, and RFC 4180 escaping is a handful of well-known rules -
+  see that file's own header comment).
+- **Formula-injection protection (task spec section 13)**: `sanitizeCsvCell`
+  prefixes a cell with a leading apostrophe when its text begins with `=`,
+  `+`, `-`, `@`, a tab, or a carriage return - the task spec's own
+  suggested strategy, extended slightly beyond its minimum `=`/`+`/`@` list
+  to match the standard, widely-cited OWASP CSV Injection mitigation list
+  at zero cost to any ordinary value. Applied before RFC 4180 quoting, so
+  the apostrophe itself is correctly escaped/quoted like any other
+  character.
+- **UTF-8 / Hebrew / Arabic**: the response body is UTF-8 throughout; a
+  leading UTF-8 BOM (`﻿`) is prepended specifically for Microsoft
+  Excel compatibility (Excel does not reliably auto-detect a BOM-less
+  UTF-8 CSV and can mis-render non-ASCII text otherwise) - every other
+  modern CSV consumer tolerates a leading BOM without issue. Verified in
+  tests with real Hebrew and Arabic titles round-tripping byte-for-byte.
+- **Export size policy (documented, deliberate choice)**: `MAX_EXPORT_ROWS
+  = 5000`. A matched-count that exceeds this ceiling is rejected up front
+  with a clear 400 error asking the Manager to narrow their filters -
+  never a silently truncated file that looks complete but omits data (task
+  spec's own explicit preference: "report clearly rather than silently
+  truncating"). No pagination-driven partial export either - a
+  filter combination matching 5,000 or fewer Requests always returns the
+  COMPLETE matching set in one file.
+- **Streaming vs. memory (documented, deliberate choice)**: generated as a
+  single in-memory string and sent directly as the HTTP response body - no
+  chunked streaming pipeline, matching this project's own established
+  "keep it simple, this project's scale doesn't need it" precedent (the
+  same reasoning `requestQueryBuilder.js` already documents for avoiding
+  an aggregation pipeline). No temporary file is ever written to disk.
+- **Empty-result behavior (documented, deliberate choice)**: a filter
+  combination matching zero Requests still returns HTTP 200 with a valid,
+  headers-only CSV (the column header row, zero data rows) - never a
+  404/empty-body response. Chosen as the cleaner of the two options the
+  task spec itself offers for a reporting endpoint.
+- **Date format**: ISO 8601 throughout (`2026-08-16T14:25:00.000Z`) for
+  every timestamp column - deliberately machine-friendly, never
+  locale-formatted server-side (that remains a frontend-only presentation
+  choice elsewhere in this project, e.g. `RequestActivityTimeline.jsx`'s
+  own `toLocaleString()`). Frontend/users may open the file directly in
+  Excel or Google Sheets, both of which parse this format correctly.
+- **DOC-53 Statistics - untouched**: the export shares zero code with the
+  statistics endpoints; exporting never recalculates or refreshes the
+  dashboard's stat cards.
+- **DOC-18 Notifications / DOC-17 Timeline - untouched**: exporting a CSV
+  is not a business event and creates no Notification and no
+  RequestActivity entry - verified directly in tests (zero calls to either
+  service across every export scenario tested, including filtered and
+  empty-result exports).
+- **DOC-15 regression**: the Operator column always reflects the Request's
+  CURRENT `assignedOperatorId` (exactly like every other read path in this
+  project) - a prior reassignment's own reason/history is never read or
+  exposed by this export; RequestActivity's own append-only audit trail is
+  completely unaffected.
+- **Test summary**: a temporary mocked test harness
+  (`backend/__doc67_test.js`, deleted after this run) with fake in-memory
+  `Request`/`User`/`ServiceCategory` stores and fake `requestActivity.service`/
+  `notification.service` spies injected into Node's `require.cache` before
+  requiring the REAL, unmodified `request.controller.js` and
+  `utils/requestQueryBuilder.js`. Covered: Authorization (6 checks -
+  `requireRole('manager')` for all four roles, route-chain static
+  verification, cross-Organization isolation with a forged
+  `organizationId` query param), Filters (9 checks - every DOC-54 filter
+  individually, combined filters, sorting), CSV Data (10 checks - every
+  column populated correctly), CSV Format (9 checks - comma/quote/newline
+  escaping, Hebrew, Arabic, UTF-8 byte-level BOM verification, formula-
+  injection neutralization, Content-Type/Content-Disposition headers),
+  Edge Cases (8 checks - zero results, missing requestNumber/Operator/
+  User/Category references, cancelled/closed/open Requests), DOC-54
+  consistency (3 checks, including a byte-for-byte Request-set comparison
+  between the list endpoint and the export for identical filters), DOC-55
+  SLA regression (4 checks - overdue/due-soon/completed-on-time/completed-
+  late all matching the existing SLA calculation), DOC-16 regression (3
+  checks), DOC-17/DOC-18 regression (4 checks - zero Timeline events,
+  zero Notifications, across normal/filtered/empty-result exports), DOC-15
+  regression (3 checks, including a simulated reassignment proving the
+  export always reflects current, not historical, assignment), and full
+  regression/module-load (7 checks, including the `MAX_EXPORT_ROWS`
+  ceiling actually rejecting a 5,001-row matched set with a clear error) -
+  **66 of 66 assertions passed, 0 failed.**
+- **Backend module-graph verification**: `node -c` syntax-checked
+  `controllers/request.controller.js`, `routes/request.routes.js`,
+  `utils/csvExport.js`, and `utils/slaPolicy.js` individually - all
+  passed; `app.js` loads cleanly with the new route registered, no
+  circular dependency, no startup job.
+- **Frontend build verification**: `npx vite build` completed with no
+  errors (69 modules transformed).
+- **Known limitations**: (1) no real MongoDB was available in this
+  environment (same disclosed limitation as every prior ticket here) - the
+  mocked harness proves the controller's own filter/CSV-building logic is
+  correct; it does not independently reprove `Request.countDocuments`'s
+  real-MongoDB behavior at the `MAX_EXPORT_ROWS` boundary. (2) PDF/Excel
+  export were explicitly out of scope for this ticket (task spec: "Do NOT
+  add PDF or Excel export in this ticket. CSV only.") and were not built.
+  (3) DOC-68 Audit Log (recording that an export happened) was explicitly
+  out of scope (task spec section 25) and was not built.
+
+## Error & UX Hardening (DOC-69)
+
+Frontend-focused ticket (see `frontend/README.md`'s own "Error & UX
+Hardening" section for the full writeup) - backend changes were audited,
+not made, because the existing error contract already satisfied every
+backend-facing requirement in the task spec:
+
+- **`middleware/errorHandler.js`** (pre-existing, unchanged): any error
+  resolving to a 5xx always returns the generic `{status: 'error',
+  message: 'Internal Server Error'}` - the real error (stack trace
+  included) is only ever `console.error`'d server-side, never sent to a
+  client. A 4xx keeps its real, already-client-safe message (every
+  controller in this project already writes 4xx messages meant to be
+  shown to a user - see e.g. `utils/requestFieldValidation.js`). Verified
+  directly in this ticket's own test pass: a simulated 500 through this
+  handler produces exactly `{"message":"Internal Server Error"}`, with no
+  trace of the original error text anywhere in the response body.
+- **`middleware/notFound.js`** (pre-existing, unchanged): any unmatched
+  API route already returns clean JSON (`{status: 'error', message:
+  'Route not found: ...'}`), never an HTML 404 page - task spec section
+  36's own ask was already satisfied.
+- **No logging changes were needed**: this project's existing logging
+  discipline (`console.error` only, server-side only, only for genuine
+  5xx-worthy failures) already excludes passwords/tokens/secrets/request
+  bodies from ever being logged - audited, not touched.
+
+## Audit Log (DOC-64)
+
+A separate, immutable, administrative-only collection answering "who
+performed an administrative action, what changed, on which entity, and
+when?" - Organization lifecycle, Manager account-management actions,
+Organization Settings, and self-service Profile changes.
+
+**NOT the Request Activity Timeline.** DOC-17's `RequestActivity` answers
+"what happened to THIS Request?" and stays completely untouched by this
+ticket - no file under that feature was modified, and `AuditLog.
+AUDIT_ACTIONS` shares zero values with `RequestActivity.ACTIVITY_TYPES`
+(verified by an automated test). The default classification rule this
+ticket applied throughout: **Request operational history stays in
+RequestActivity; administrative account/Organization changes go in
+AuditLog; never both, without a documented strong reason** - none was
+found for any Request lifecycle action (assignment, reassignment, cancel,
+close, status, images, comments all remain RequestActivity-only, exactly
+as before).
+
+### Classification (task spec section 1)
+
+| Action | Where it's recorded |
+| --- | --- |
+| System Admin: create/activate/deactivate/delete Organization, regenerate company code, assign/replace Manager | **AuditLog** |
+| Manager: role change, deactivate/reactivate user, reset password, change specialties, create/rename/activate/deactivate Service Category, Organization Settings update | **AuditLog** |
+| Self-service: Profile `fullName` update (DOC-62) | **AuditLog** |
+| Self-service: Change Password | **Deferred** - see below |
+| Manager-edited Employee/Operator `fullName`/`email` (DOC-50) | **Neither** - see below |
+| Request creation/assignment/reassignment/status/cancel/close/images/comments (Manager or otherwise) | **RequestActivity only** (DOC-17) - never duplicated |
+
+**Deliberately deferred**: self-service `PATCH /api/auth/change-password`
+does **not** record an audit entry in this pass (task spec section 24
+explicitly allows deferring "if this expands scope too much" - it does not
+touch `auth.controller.js` at all, keeping this already-critical,
+already-audited security file completely unmodified by this ticket). A
+`USER_PASSWORD_RESET` entry (the Manager-driven equivalent) IS recorded -
+see below - so password-reset activity by a Manager is fully covered; only
+a person changing their own password voluntarily is not yet logged. If
+this is wanted later, `changePassword`'s own `.save()` success is the one
+place to add it, following the exact same pattern `USER_PASSWORD_RESET`
+already establishes (`changes: null`, safe identity-only metadata).
+
+**Deliberately NOT logged**: DOC-50's `updateUserProfile` (a Manager
+editing an Employee/Operator's own `fullName`/`email`) is not in the task
+spec's own action enum and was not in its section-1 audit-scope list
+either - left out to avoid "adding actions blindly" (task spec section 6).
+It can be added later as a new action type following the same pattern used
+throughout this ticket, without any architectural change.
+
+### AuditLog model (`models/AuditLog.js`)
+
+```
+{
+  _id,
+  organizationId,   // the AFFECTED Organization when one exists, else null
+  actorId,          // always req.user.userId - never req.body
+  action,           // controlled enum, AUDIT_ACTIONS
+  targetType,       // 'Organization' | 'User' | 'ServiceCategory'
+  targetId,
+  changes,          // { field: { from, to } } for ONLY changed fields, or null
+  metadata,         // small, safe, structured extra context
+  createdAt,        // server time only (timestamps: { createdAt: true, updatedAt: false })
+}
+```
+
+Three indexes, matching the task spec's own suggested set exactly:
+`{ organizationId: 1, createdAt: -1 }`, `{ actorId: 1, createdAt: -1 }`,
+`{ action: 1, createdAt: -1 }`.
+
+**19 action types implemented** (`AUDIT_ACTIONS`): `ORGANIZATION_CREATED`,
+`ORGANIZATION_UPDATED`, `ORGANIZATION_ACTIVATED`,
+`ORGANIZATION_DEACTIVATED`, `ORGANIZATION_DELETED`,
+`COMPANY_CODE_REGENERATED`, `MANAGER_ASSIGNED`, `MANAGER_REPLACED`,
+`USER_ROLE_CHANGED`, `USER_DEACTIVATED`, `USER_REACTIVATED`,
+`USER_PASSWORD_RESET`, `USER_SPECIALTIES_CHANGED`,
+`SERVICE_CATEGORY_CREATED`, `SERVICE_CATEGORY_UPDATED`,
+`SERVICE_CATEGORY_ACTIVATED`, `SERVICE_CATEGORY_DEACTIVATED`,
+`ORGANIZATION_SETTINGS_UPDATED`, `PROFILE_UPDATED`. All 18 of the task
+spec's own "at minimum consider" list are implemented, plus one deliberate,
+justified addition - `ORGANIZATION_DELETED` - covering DOC-47's real,
+existing hard-delete functionality, which the task spec's own audit
+instructions explicitly asked to be inspected ("any Organization deletion
+behavior if it exists").
+
+### Audit service (`services/auditLog.service.js`)
+
+The sole owner of every `AuditLog.create(...)` call - no controller calls
+the model directly. `recordAuditLog({ actorId, organizationId, action,
+targetType, targetId, changes, metadata })`:
+
+- Validates `action` against `AUDIT_ACTIONS` and `targetType` against
+  `TARGET_TYPES` - an unrecognized value is rejected (logged server-side,
+  never written).
+- Runs both `changes` and `metadata` through `sanitizeStructuredData` - a
+  recursive, depth-limited filter that drops any key whose lowercased name
+  contains a sensitive substring (`password`, `secret`, `jwt`, `token`,
+  `credential`, `mongodb_uri`/`mongo_uri`, `aws`, `accesskey`,
+  `privatekey`, `tls`, `apikey`, ...) - defense in depth on top of every
+  call site already passing small, hand-curated, safe objects (never
+  `req.body`).
+- **Never throws.** Mirrors DOC-17/DOC-18's own documented failure
+  strategy exactly (task spec section 12/30): the underlying administrative
+  business write is always already fully committed BEFORE this is ever
+  called, and any failure here (a bad action/targetType, a database error)
+  is caught, logged via `console.error` server-side (never leaking
+  metadata to the client - the caller's own response is independent of
+  this outcome), and resolved to `null`. A rare audit-write failure
+  therefore never rolls back, blocks, or falsely reports failure for an
+  administrative action that actually succeeded - this project
+  deliberately does not use MongoDB multi-document transactions to make
+  the pair atomic, for the same standalone-`mongod`-compatibility reason
+  DOC-17/DOC-18 already documented.
+
+### Sensitive-data handling (task spec sections 7/8/10 - CRITICAL)
+
+- **`USER_PASSWORD_RESET`**: `changes` is always `null` (there is no safe
+  "from/to" for a password); `metadata` is limited to
+  `{ targetUserId, targetUserName }` only. Never a plaintext password,
+  temporary password, or `passwordHash`, anywhere.
+- **`COMPANY_CODE_REGENERATED`**: `changes` is always
+  `{ companyCodeChanged: true }` - the actual old/new company code values
+  are never stored, verified directly by an automated test that serializes
+  the entry and confirms neither code string appears anywhere in it.
+- **Central sanitization** (`sanitizeStructuredData`) is a second,
+  independent safety net beyond "every call site already passes safe data"
+  - see above.
+
+### Organization audit behavior
+
+Every real System Admin Organization action records exactly one audit
+event per distinct fact (task spec section 13: "prefer one meaningful
+audit event per administrative action") - a single `PATCH
+/api/organizations/:id` that changes both `name` and `isActive` in one
+call correctly produces TWO entries (`ORGANIZATION_UPDATED` +
+`ORGANIZATION_ACTIVATED`/`DEACTIVATED`), never one vague combined event.
+`createOrganization` records `ORGANIZATION_CREATED` always, plus a
+separate `MANAGER_ASSIGNED` only when an initial Manager was actually
+created in the same call. `assignManager`/`replaceManager` record
+`MANAGER_ASSIGNED`/`MANAGER_REPLACED` with safe manager identities
+(`fullName`/`id`) only. `deleteOrganization` records
+`ORGANIZATION_DELETED` with the Organization's own id/name (the id is
+retained in the audit entry even though the document itself no longer
+exists - the read API's target-display logic already degrades gracefully
+for this, reading the name from the entry's own snapshotted `metadata`,
+never a live lookup).
+
+### Manager assignment / user-management audit behavior
+
+`updateUserRole` (`USER_ROLE_CHANGED`), `updateUserStatus`
+(`USER_DEACTIVATED`/`USER_REACTIVATED`, only when the value genuinely
+changed - the endpoint's own idempotent-retry behavior never produces
+duplicate entries), `resetUserPassword` (`USER_PASSWORD_RESET`, see above),
+and `updateUserSpecialties` (`USER_SPECIALTIES_CHANGED`, storing resolved
+Category **names** before/after, never full Category documents or ids
+alone) all record one entry each, after their own business write already
+succeeded. A rejected/invalid request (bad role transition, malformed
+`isActive`, etc.) never reaches the `recordAuditLog` call at all - verified
+directly by automated tests asserting zero new entries after a 400
+response.
+
+### Organization Settings (DOC-61) audit behavior
+
+`updateMyOrganization`'s audit entry (`ORGANIZATION_SETTINGS_UPDATED`)
+includes **only the fields that actually changed** - a before/after
+snapshot is taken for every field present in the request BEFORE the
+update is applied, then compared against the saved value; a field
+re-sent with its already-current value is silently excluded from
+`changes`, and if NOTHING genuinely changed, no audit entry is written at
+all (verified: exactly one entry for one genuine settings change). The
+existing DOC-61 protections (`companyCode`/`isActive`/`createdAt`/etc.
+hard-rejected before any field is even looked at) are completely
+unaffected by this addition - a rejected forbidden-field request still
+creates zero audit entries.
+
+### User Profile (DOC-62) audit behavior
+
+`updateMyProfile`'s audit entry (`PROFILE_UPDATED`) is recorded only when
+`fullName` genuinely changed (an unchanged re-save creates no entry).
+`actorId` and the target User are the SAME person here by design - unlike
+Notification's own actor-exclusion rule, Audit Log has no such
+restriction: "Manager Mahmoud updated own profile" is exactly the fact
+this collection exists to answer. `organizationId` is
+`req.user.organizationId` (`null` for System Admin's own self-profile
+edit, which is genuinely platform-level). No DOC-18 Notification is
+created for this (unchanged - this endpoint never created one before this
+ticket either).
+
+### Read API (`GET /api/audit-logs`)
+
+Manager and System Admin only - `routes/auditLog.routes.js` composes
+`requireRole('manager', 'system_admin')`; Employee/Operator are
+structurally rejected before the controller is ever reached.
+
+- **Manager**: always scoped to `req.user.organizationId` - any
+  `?organization=` query value a Manager sends is simply never read (task
+  spec section 27: "Do not accept arbitrary organizationId from Manager").
+- **System Admin**: platform-wide by default; may narrow to one
+  Organization via a validated `?organization=<id>` (400 if malformed or
+  unresolvable).
+- **Filters**: `action`, `targetType`, `actor` (a user id), `createdFrom`/
+  `createdTo` (reuses DOC-54's own `buildCreatedAtRangeFilter` - the exact
+  same date-range semantics every Request search control already uses).
+- **Pagination**: `limit` (1-100, default 20) / `before` (cursor by audit
+  log id), newest-first - the identical shape DOC-18's own
+  `GET /api/notifications` already established. The `before` cursor is
+  re-validated against the SAME scoping query the rest of the request
+  already uses, so a Manager can never use a cursor id from another
+  Organization to page past their own boundary, even if they somehow
+  obtained a real id belonging to it.
+- **Response shape**: `{ id, action, actor: {id, fullName, role},
+  targetType, target: {id, displayName}, changes, metadata, organizationId,
+  createdAt }`. `actor` is resolved via one batched `User.find({_id:
+  {$in:...}})` per page (never N+1); a historical actor that cannot be
+  resolved falls back to `{fullName: 'Unknown user', role: null}`, the
+  same defensive shape DOC-18's own actor resolution already uses. `target
+  .displayName` is read directly from the entry's own already-safe
+  `metadata` (`organizationName`/`targetUserName`/`categoryName`, each
+  snapshotted at write time by the call site that created it) rather than
+  a live lookup by `targetId` - this is what lets a DELETED target (e.g. an
+  `ORGANIZATION_DELETED` entry) still show a meaningful name.
+
+### Immutability (task spec section 36)
+
+`routes/auditLog.routes.js` defines exactly one route - `GET /`. There is
+no `PATCH`/`PUT`/`POST`/`DELETE` anywhere on this router, for any role,
+including System Admin - verified directly by an automated test that reads
+the route file's own source and confirms none of those method calls are
+present.
+
+### Historical data (task spec section 37)
+
+Administrative actions performed before this ticket shipped have no
+corresponding AuditLog entry - there is no backfill script, and nothing
+runs automatically on startup (`app.js` requires no migration for this
+model).
+
+### Failure strategy (task spec section 12)
+
+See `services/auditLog.service.js`'s own top comment (summarized above) -
+every audit write happens strictly AFTER its business operation has
+already succeeded, never blocks or conditions the client's response on
+its own outcome, and never throws. **Known limitation, disclosed rather
+than hidden**: in the rare case an audit write itself fails (e.g. a
+transient database error at exactly the wrong moment), the underlying
+administrative action still fully succeeds and is reported to the client
+as successful, but that one action will have no corresponding AuditLog
+entry - there is no retry queue or dead-letter mechanism in this version.
+This mirrors the identical, already-accepted trade-off DOC-17/DOC-18 made
+for Request activity/notifications, for the identical reason (no MongoDB
+multi-document transaction support assumed).
+
+## DOC-66 - Final Security & End-to-End Hardening
+
+A system-wide, read-mostly audit and verification pass over the entire
+application - not a new feature. Goal: validate authorization boundaries,
+multi-organization isolation, and close any remaining security gaps before
+final review. Full methodology and the 63-item structured result are in
+the DOC-66 final report delivered in-conversation; this section records
+only the findings that change what an operator/reviewer needs to know.
+
+**Result: no critical or high-severity defect was found.** The
+DOC-38/DOC-56/DOC-57 isolation and authorization conventions documented
+throughout this README were re-verified, both by static source audit
+(every `Request`/`Comment`/`ChatMessage`/`AuditLog` lookup in the
+codebase) and by a consolidated mocked attack/regression test harness (63
+assertions: role escalation, cross-Organization IDOR, mass assignment,
+MongoDB-operator-injection-shaped payloads, CSV formula injection, Manager
+audit-log isolation and cursor-boundary rejection) - all passed. No code
+changes were required as a result of this ticket.
+
+**Dependency audit (`npm audit`, task spec section 48).** Backend: 0
+vulnerabilities across 144 production dependencies. Frontend: 6
+vulnerabilities (2 high, 4 moderate), all in `devDependencies` (`vite`/
+`esbuild`, dev-server-only - never shipped in the production `dist/`
+build, confirmed by grepping the built output for the affected packages)
+or requiring a breaking major-version upgrade to fix (`react-router-dom`
+6.x -> 7.x for a moderate open-redirect advisory; `vite` 5.x -> 8.x). Per
+this ticket's own constraint ("do not introduce breaking dependency
+upgrades automatically"), none of these were applied - they are disclosed
+here for a maintainer to schedule deliberately, tested against the app,
+outside this ticket's scope.
+
+**Rate limiting (task spec section 43) - audited, not added.** No
+`express-rate-limit` (or equivalent) dependency exists in this project.
+This is a deliberate decision, not an oversight: this is an academic/
+local-deployment project with no current evidence of abuse, and the task
+spec explicitly permits leaving this unaddressed if adding it would risk
+breaking development/tests. Login brute-forcing remains a known,
+disclosed gap for a future ticket to address deliberately.
+
+**Live/real-environment testing - explicitly disclosed (task spec section
+53).** This audit's environment had no reachable MongoDB instance (the
+real `MONGODB_URI` in this deployment's own `.env` points at a live
+Atlas cluster with no network egress from the audit sandbox) - real-
+database, real-HTTPS, and real-S3 tests were **not** performed live.
+What WAS verified live: the frontend production build (`npm run build`
+succeeds, output grepped clean of secret variable names), and `npm audit`
+against real installed dependency trees for both backend and frontend.
+Everything else in this pass is either a static source audit or a
+mocked-model test (see the harness described above) - never claimed as a
+live test it wasn't.
+
+**Secrets.** No hardcoded secret value exists anywhere in tracked source
+(`JWT_SECRET`/`MONGODB_URI`/AWS credentials are only ever read from
+`process.env`, never logged, never returned in any API response).
+`backend/.env` is confirmed gitignored and was not modified, read into
+this report, or printed anywhere during this audit.

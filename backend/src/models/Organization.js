@@ -73,6 +73,58 @@ const organizationSchema = new mongoose.Schema(
       ref: 'User',
       default: null,
     },
+    // DOC-61 - "Organization Settings for Manager". Three new, optional
+    // profile-style fields - the entire deliberately-small set the task
+    // spec asks for (task spec section 3: "Do not create excessive
+    // profile fields."). All three are editable by the Organization's own
+    // Manager through PATCH /api/organizations/me (see
+    // controllers/organization.controller.js's own updateMyOrganization) -
+    // never by mass assignment, always through an explicit field
+    // allowlist. None of the three participates in any existing business
+    // rule anywhere in this codebase: `description` is a free-text
+    // profile blurb, `contactEmail`/`contactPhone` are ORGANIZATION-level
+    // contact details (e.g. a general company inbox/switchboard number) -
+    // deliberately NOT the Manager's own login email (`User.email`,
+    // authApi's login identity), which this feature never reads or
+    // writes (task spec section 18: "Changing organization contactEmail
+    // must NOT modify Manager/User email."). `default: null` (never
+    // `default: ''`) for all three, matching this project's own
+    // established "optional field, no value" convention (e.g.
+    // `Request.cancelReason`, DOC-15/59) - lets every historical
+    // Organization created before this ticket load safely with no
+    // migration (Mongoose's own schema `default` only ever applies to a
+    // NEW document; a pre-existing document simply reads back
+    // `undefined`/`null` for a field it never had, which this schema and
+    // every consumer already treats identically to an explicit `null`).
+    description: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+      default: null,
+    },
+    // Deliberately NOT `unique` and NOT validated as a login identity -
+    // this is presentation-only contact information (task spec section
+    // 18), format-validated (a real email shape) but never checked
+    // against `User` documents for uniqueness/ownership the way
+    // `User.email` is.
+    contactEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: null,
+    },
+    // Deliberately permissive (task spec section 19: "Do not over-
+    // restrict to one country.") - format is validated at the
+    // application layer (controllers/organization.controller.js's
+    // `validateContactPhone`), not via a Mongoose `match` regex here, so
+    // the one validation rule lives in exactly one place or the other,
+    // never split across both and at risk of drifting apart.
+    contactPhone: {
+      type: String,
+      trim: true,
+      maxlength: 30,
+      default: null,
+    },
   },
   {
     timestamps: true,

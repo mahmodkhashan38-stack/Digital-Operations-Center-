@@ -71,15 +71,45 @@ const validateCancelReason = (reason) => {
   return null;
 };
 
+// DOC-15 - "Advanced Request History & Reassignment". A reason required
+// whenever a Manager REPLACES or REMOVES an already-assigned Operator
+// (reassignment/unassignment) - deliberately NOT required for a genuine
+// first assignment (unassigned -> Operator A), per the task spec's own
+// explicit carve-out. Mirrors validateCancelReason's exact bounds (min 3,
+// max 500, reject whitespace-only) - the same "brief mandatory
+// administrative note, not a free-form comment" shape this project already
+// established for Manager cancellation - reused here as its own function
+// (rather than calling validateCancelReason directly) purely so the error
+// message text stays accurate to what is actually being validated.
+const MIN_ASSIGNMENT_REASON_LENGTH = 3;
+const MAX_ASSIGNMENT_REASON_LENGTH = 500;
+
+const validateAssignmentReason = (reason) => {
+  if (typeof reason !== 'string') {
+    return 'A reason is required.';
+  }
+  const trimmed = reason.trim();
+  if (trimmed.length === 0) {
+    return 'A reason is required.';
+  }
+  if (trimmed.length < MIN_ASSIGNMENT_REASON_LENGTH || trimmed.length > MAX_ASSIGNMENT_REASON_LENGTH) {
+    return `Reason must be between ${MIN_ASSIGNMENT_REASON_LENGTH} and ${MAX_ASSIGNMENT_REASON_LENGTH} characters.`;
+  }
+  return null;
+};
+
 module.exports = {
   validateTitle,
   validateDescription,
   validatePriority,
   validateCancelReason,
+  validateAssignmentReason,
   MIN_TITLE_LENGTH,
   MAX_TITLE_LENGTH,
   MIN_DESCRIPTION_LENGTH,
   MAX_DESCRIPTION_LENGTH,
   MIN_CANCEL_REASON_LENGTH,
   MAX_CANCEL_REASON_LENGTH,
+  MIN_ASSIGNMENT_REASON_LENGTH,
+  MAX_ASSIGNMENT_REASON_LENGTH,
 };

@@ -8,6 +8,7 @@ import RequestRow from '../components/RequestRow.jsx';
 import RequestSearchControls from '../components/RequestSearchControls.jsx';
 import StatBreakdownList from '../components/StatBreakdownList.jsx';
 import RequestStatusBadge from '../components/RequestStatusBadge.jsx';
+import RequestNumberBadge from '../components/RequestNumberBadge.jsx';
 
 // DOC-54 - Employee gets no creator/Operator override (task spec: "Do not
 // allow creator or Operator filtering unless merely displaying assigned
@@ -755,6 +756,7 @@ function Dashboard() {
               {duplicateWarning.map((duplicate) => (
                 <li key={duplicate.id} className="duplicate-request-item">
                   <div className="duplicate-request-item-main">
+                    <RequestNumberBadge requestNumber={duplicate.requestNumber} />
                     <span className="stat-value">{duplicate.title}</span>
                     <RequestStatusBadge status={duplicate.status} />
                   </div>

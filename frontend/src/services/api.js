@@ -1,5 +1,49 @@
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
+// DOC-69 - "Error & UX Hardening" (task spec section 14, "Auth
+// Expiration"). Before this ticket, an expired/invalid JWT discovered
+// mid-session (as opposed to on initial page load, which
+// AuthContext.jsx's own restoreSession already handled) had no
+// application-wide effect: the page that happened to make the rejected
+// call would show its own inline error message, but the stale token
+// stayed in memory/localStorage and the person stayed on the same
+// (now-broken) page rather than being routed back to Login.
+//
+// `setUnauthorizedHandler` lets AuthContext.jsx (the one place that owns
+// auth state) register a callback this plain module can invoke without
+// this file needing to import React/Context itself. Deliberately a single
+// module-level slot (never a list/event-bus) - there is exactly one
+// AuthProvider mounted for the lifetime of this app (see main.jsx), so a
+// single slot is sufficient and simpler than a pub/sub system this project
+// does not otherwise need.
+let unauthorizedHandler = null;
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = handler;
+}
+
+// The EXACT strings backend/src/middleware/auth.js's own verifyToken
+// returns for "this token is no longer usable" (missing/expired/invalid)
+// and for a deactivated account discovered mid-session - kept in sync
+// with that file by design, not guessed. Matching on these specific
+// messages (rather than "any 401/403 on any authenticated call") is
+// deliberate: several endpoints legitimately return 401 for a genuine
+// business reason that is NOT an expired session and must never force a
+// logout - most notably `authApi.changePassword`'s own "Current password
+// is incorrect." (also 401, see backend/src/controllers/
+// auth.controller.js) - a person mistyping their current password must
+// see that inline error on the Change Password form, never be bounced to
+// Login. If this project's own auth middleware message text ever changes,
+// the worst case is that this enhancement silently stops auto-triggering
+// (the person still sees the normal inline error either way, just without
+// the bonus redirect) - it can never falsely log someone out because of a
+// mismatch, only fail to fire.
+const SESSION_INVALID_MESSAGES = new Set([
+  'Authentication token is missing.',
+  'Authentication token has expired.',
+  'Invalid authentication token.',
+]);
+const ACCOUNT_DEACTIVATED_MESSAGE = 'This account has been deactivated.';
+
 // Generic request helper for talking to the backend API.
 //
 // DOC-45: `body` may now be a `FormData` instance (image uploads) as well
@@ -21,11 +65,29 @@ async function request(path, { method = 'GET', body, token } = {}) {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    method,
-    headers,
-    body: isFormData ? body : (body ? JSON.stringify(body) : undefined),
-  });
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers,
+      body: isFormData ? body : (body ? JSON.stringify(body) : undefined),
+    });
+  } catch (networkError) {
+    // DOC-69 (task spec section 13) - `fetch()` itself throws (never
+    // resolves to a Response) when the server is unreachable at all -
+    // offline, DNS failure, connection refused, CORS preflight failure,
+    // etc. Left uncaught, this propagates the browser's own raw message
+    // ("Failed to fetch" / "NetworkError when attempting to fetch
+    // resource" / "Load failed") straight to whatever component called
+    // this - exactly the raw technical string the task spec singles out
+    // by name as something a user must never see directly. Every existing
+    // caller's `catch (error) { ...error.message... }` continues to work
+    // completely unchanged - it now simply receives this clean message
+    // instead of the browser's own one.
+    const connectionError = new Error('Unable to connect to the server. Please check your connection and try again.');
+    connectionError.isNetworkError = true;
+    throw connectionError;
+  }
 
   const data = await response.json().catch(() => ({}));
 
@@ -43,6 +105,19 @@ async function request(path, { method = 'GET', body, token } = {}) {
     // that without a second, parallel request-helper implementation.
     error.status = response.status;
     error.data = data;
+
+    // DOC-69 - only ever considered for an AUTHENTICATED call (a `token`
+    // was actually sent - never Login/Register themselves, which never
+    // pass one) whose message exactly matches one of the known
+    // session-invalid/deactivated strings above. See this file's own
+    // comment on `SESSION_INVALID_MESSAGES` for why message-matching
+    // (not a blanket status check) is deliberate here.
+    if (token && unauthorizedHandler
+      && ((response.status === 401 && SESSION_INVALID_MESSAGES.has(message))
+        || (response.status === 403 && message === ACCOUNT_DEACTIVATED_MESSAGE))) {
+      unauthorizedHandler();
+    }
+
     throw error;
   }
 
@@ -64,6 +139,21 @@ export const authApi = {
   changePassword: (payload, token) => request('/auth/change-password', { method: 'PATCH', body: payload, token }),
 };
 
+// DOC-62 - "User Profile". `updateMine` is the ONE new call this ticket
+// adds - a thin `PATCH /users/me` wrapper, reachable by every authenticated
+// role (backend enforces this, not this client - see routes/user.routes.js).
+// `updates` should only ever contain `{ fullName }` - the backend rejects
+// (400) role/organizationId/isActive/password/passwordHash/
+// mustChangePassword/createdAt/updatedAt/_id/id/email/specialties outright
+// if any of them are present, even if this client were to send one (it
+// never does). This client never sends a userId either - the backend
+// derives the target entirely from the authenticated caller's own token
+// context, exactly like `organizationApi.updateMine` (DOC-61) already does
+// for Organization Settings.
+export const userSelfApi = {
+  updateMine: (updates, token) => request('/users/me', { method: 'PATCH', body: updates, token }),
+};
+
 // Organization-management API calls (DOC-32/DOC-34/DOC-41). Every one of
 // these hits an existing System-Admin-only backend endpoint - nothing here
 // invents new backend behavior, it only exposes what already exists to the
@@ -81,6 +171,17 @@ export const organizationApi = {
   // Dashboard's Organization Information section and the Operator
   // Dashboard's organization context.
   getMine: (token) => request('/organizations/me', { method: 'GET', token }),
+  // DOC-61 - "Organization Settings for Manager". Manager-only on the
+  // backend (`requireRole('manager')` - see routes/organization.routes.js).
+  // `updates` should only ever contain a subset of
+  // { name, description, contactEmail, contactPhone } - the backend
+  // rejects (400) companyCode/isActive/createdAt/manager/managerId/
+  // organizationId/_id/id/users outright if any of them are present, even
+  // if this client were to send one (it never does). This client never
+  // sends an organizationId either - the backend derives the target
+  // Organization entirely from the authenticated Manager's own token
+  // context, exactly like `getMine` above.
+  updateMine: (updates, token) => request('/organizations/me', { method: 'PATCH', body: updates, token }),
   // `manager` is optional: { fullName, email, password }. companyCode,
   // managerId, and organizationId are never sent from here - the backend
   // generates/derives all of those itself.
@@ -261,6 +362,84 @@ export const requestApi = {
   // the special "unassigned" value, and createdBy) and the createdFrom/
   // createdTo date range.
   listOrganization: (token, filters) => request(`/requests/organization${buildRequestQueryString(filters)}`, { method: 'GET', token }),
+  // DOC-67 - "Request Reports & CSV Export". Deliberately does NOT reuse
+  // the shared `request()` helper above - that helper always calls
+  // `response.json()`, which would break on this endpoint's real
+  // (non-JSON) success response, a raw `text/csv` file. On failure the
+  // backend still returns the project's normal JSON error shape
+  // (`{status, message}`), so this function mirrors `request()`'s own
+  // error-handling contract (throws an `Error` whose `.message` is the
+  // server's message, `.status` is the real HTTP status) for exactly that
+  // case - only the SUCCESS path differs, returning a `Blob` plus the
+  // filename the backend chose (parsed from its own
+  // `Content-Disposition` header - task spec section 5's own safe,
+  // server-generated `requests-YYYY-MM-DD.csv` shape) instead of parsed
+  // JSON. `filters` reuses the exact same query-string builder every
+  // other filtered list call in this file already uses - the export
+  // always requests the CURRENT filter state, never an unfiltered pull
+  // (task spec section 18).
+  //
+  // AUTHENTICATED DOWNLOAD, NOT A RAW BROWSER NAVIGATION (task spec
+  // section 19): a plain `<a href="...">`/`window.location` navigation to
+  // this endpoint would never attach the `Authorization` header this
+  // project's JWT auth requires, and the token must never be placed in a
+  // query parameter (task spec: "Do not put JWT in query parameters. Do
+  // not expose tokens in downloadable URLs."). Calling this via
+  // authenticated `fetch` and handing the caller back a `Blob` is what
+  // lets ManagerDashboard.jsx build a short-lived `ObjectURL` and trigger
+  // the actual save entirely client-side (see that file's own
+  // `handleExportCsv`), with the real token never touching the URL bar or
+  // any downloadable link at all.
+  exportOrganizationCsv: async (token, filters) => {
+    const headers = {};
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    let response;
+    try {
+      response = await fetch(`${API_BASE_URL}/requests/organization/export${buildRequestQueryString(filters)}`, {
+        method: 'GET',
+        headers,
+      });
+    } catch (networkError) {
+      // DOC-69 - same raw-fetch() network-failure handling as the shared
+      // `request()` helper above (this call deliberately bypasses that
+      // helper - see its own top comment - but must not bypass this
+      // safety net too).
+      const connectionError = new Error('Unable to connect to the server. Please check your connection and try again.');
+      connectionError.isNetworkError = true;
+      throw connectionError;
+    }
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const message = data?.message || 'Something went wrong. Please try again.';
+      const error = new Error(message);
+      error.status = response.status;
+      error.data = data;
+      // DOC-69 - same session-expiry detection as the shared `request()`
+      // helper (see its own comment on SESSION_INVALID_MESSAGES) - this
+      // endpoint bypasses `request()` for its success path (a Blob, not
+      // JSON) but must not bypass the same auto-logout safety net on
+      // failure.
+      if (token && unauthorizedHandler
+        && ((response.status === 401 && SESSION_INVALID_MESSAGES.has(message))
+          || (response.status === 403 && message === ACCOUNT_DEACTIVATED_MESSAGE))) {
+        unauthorizedHandler();
+      }
+      throw error;
+    }
+
+    const blob = await response.blob();
+    // Parses `attachment; filename="requests-2026-08-16.csv"` back into
+    // just the filename - falls back to a locally-built same-shape name
+    // if the header is ever missing/unparseable for any reason (should
+    // not happen against this project's own backend, defensive only).
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `requests-${new Date().toISOString().slice(0, 10)}.csv`;
+    return { blob, filename };
+  },
   // DOC-52: Operator-only, only Requests currently assigned to the caller
   // - used by the Operator Dashboard in place of its old placeholders.
   // DOC-54: `filters` optional, same contract as listMine (no operator/
@@ -274,12 +453,24 @@ export const requestApi = {
   // operators in the UI. Only usable while the Request is still 'open'
   // (also enforced server-side, same as every other eligibility rule in
   // this project).
-  assignOperator: (id, operatorId, token) => request(`/requests/${id}/assign`, { method: 'PATCH', body: { operatorId }, token }),
+  // DOC-15 - "Advanced Request History & Reassignment" extended this same
+  // endpoint: `operatorId` may now also be explicit `null` (unassign), and
+  // `reason` is a new optional parameter - required by the backend for a
+  // genuine reassignment/unassignment, ignored for a first assignment
+  // (task spec section 5). `reason` is simply omitted from the JSON body
+  // (`undefined`) when the caller has none to send - the backend only
+  // ever validates it when it actually needs one.
+  assignOperator: (id, operatorId, reason, token) => request(`/requests/${id}/assign`, { method: 'PATCH', body: { operatorId, reason }, token }),
   // Sprint 4 (DOC-59) - Manager Request Administration, three dedicated
   // Manager-only endpoints - never the Employee-only calls above.
   // `updates` should only ever contain a subset of
   // { priority, categoryId, assignedOperatorId } - assignedOperatorId may
   // be a real operator id (assign/reassign) or explicit `null` (remove).
+  // DOC-15 - `updates` may now also include `reason`, required by the
+  // backend whenever `assignedOperatorId` represents a genuine
+  // reassignment/unassignment (never for a first assignment) - the exact
+  // same rule assignOperator's own DOC-15 extension enforces, held in
+  // parity across both of this project's assignment-capable endpoints.
   // The backend independently re-validates every rule (open-only for
   // assignment changes, active+same-org+specialty-matching operator,
   // active category, no terminal-status edits) regardless of what this
@@ -318,6 +509,12 @@ export const requestApi = {
   // own already-stored metadata, this client never sends a filesystem
   // path. Same eligibility as addCompletionImages (in_progress only).
   removeCompletionImage: (id, attachmentId, token) => request(`/requests/${id}/completion-images/${attachmentId}`, { method: 'DELETE', token }),
+  // DOC-17 - "Request Activity Timeline". Reachable by Employee (own
+  // Request), Operator (assigned Request), Manager (any Request in their
+  // Organization) - the backend is the sole authority on that, same as
+  // every other endpoint here. Returns activity events oldest-first,
+  // ready to render directly with no client-side re-sorting.
+  getActivities: (id, token) => request(`/requests/${id}/activities`, { method: 'GET', token }),
 };
 
 // Comment API calls (DOC-13, create + view only - no edit/delete). Reachable
@@ -345,6 +542,43 @@ export const commentApi = {
 export const chatApi = {
   list: (token, params) => request(`/chat/messages${buildRequestQueryString(params)}`, { method: 'GET', token }),
   send: (content, token) => request('/chat/messages', { method: 'POST', body: { content }, token }),
+};
+
+// DOC-18 - "In-App Notifications". Reachable by manager/operator/employee
+// only on the backend (System Admin is structurally rejected -
+// req.user.organizationId is always null for that role - see
+// routes/notification.routes.js) - a system_admin or unauthenticated call
+// simply fails (403/401), the same as every other endpoint in this file.
+// Every call here is already scoped to the caller's own inbox server-side
+// (routes/notification.routes.js + controllers/notification.controller.js)
+// - this client never sends and could never send a recipientId.
+// DOC-64 - "Audit Log". Manager (own Organization only) / System Admin
+// (platform-wide, with an optional `organization` filter) - see
+// backend/src/routes/auditLog.routes.js for the full authorization chain.
+// `params` may include `{ limit, before, action, targetType, actor,
+// createdFrom, createdTo, organization }`, all optional - reuses the exact
+// same query-string builder every other filtered/paginated call in this
+// file already uses. There is no create/update/delete call here at all -
+// this collection is read-only from the frontend's point of view, matching
+// the backend having no PATCH/DELETE route for it (task spec section 36).
+export const auditLogApi = {
+  list: (token, params) => request(`/audit-logs${buildRequestQueryString(params)}`, { method: 'GET', token }),
+};
+
+export const notificationApi = {
+  // `params` is `{ before, limit }`, both optional - reuses the exact same
+  // query-string builder every other paginated call in this file already
+  // uses. Newest-first, ready to render directly with no client-side
+  // re-sorting (the opposite reading order from requestApi.getActivities,
+  // which is oldest-first - see backend/README.md's DOC-18 section for why
+  // that difference is deliberate).
+  list: (token, params) => request(`/notifications${buildRequestQueryString(params)}`, { method: 'GET', token }),
+  getUnreadCount: (token) => request('/notifications/unread-count', { method: 'GET', token }),
+  // No body - `id` alone identifies which single notification to mark
+  // read; the backend derives WHO is marking it from the token, never
+  // from anything this client sends.
+  markRead: (id, token) => request(`/notifications/${id}/read`, { method: 'PATCH', token }),
+  markAllRead: (token) => request('/notifications/read-all', { method: 'PATCH', token }),
 };
 
 export default request;

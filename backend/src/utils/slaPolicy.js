@@ -224,14 +224,68 @@ function classifySlaBucket(requestDoc, now = new Date()) {
   return 'on_track';
 }
 
+// DOC-67 - "Request Reports & CSV Export". The task spec's CSV report asks
+// for a richer, six-value "SLA Status" column (on_track / due_soon /
+// overdue / completed_on_time / completed_late / unavailable) than either
+// SLA_STATUS_VALUES (the four-value FILTER vocabulary above, which has no
+// notion of "on time" vs "late" - a completed Request simply isn't
+// selectable by any of its four values) or classifySlaBucket's five-value
+// bucket (whose 'completed' does not distinguish on-time from late
+// either). Rather than inventing a second, independent SLA calculation for
+// the CSV export (task spec section 11 explicitly forbids this -
+// "Do NOT create a second SLA calculation implementation"), this function
+// is a thin, additive wrapper around classifySlaBucket: every bucket value
+// other than 'completed' is returned completely unchanged (identical
+// on_track/due_soon/overdue/unavailable semantics, computed the exact same
+// way, from the exact same ACTIVE_SLA_STATUSES/DUE_SOON_WINDOW_MINUTES
+// constants above). Only 'completed' is refined further - into
+// 'completed_on_time' or 'completed_late' - and even that refinement
+// reuses an already-established comparison this project makes elsewhere:
+// utils/requestStatistics.js's own SLA-compliance calculation already
+// defines "on time" as `resolvedAt <= slaDueAt` for a resolved/closed
+// Request; this function applies that identical comparison, not a new one.
+//
+// COMPLETION-TIMESTAMP FALLBACK (documented choice, for the edge case a
+// completed Request has no `resolvedAt` - e.g. a cancelled Request, which
+// never necessarily passes through 'resolved'): falls back to `closedAt`,
+// then to `cancelledAt` (DOC-59), in that order - the closest real
+// "when did this stop being active" timestamp this project has recorded.
+// If a completed Request genuinely has none of the three (should not occur
+// via any normal status transition in this project), this defensively
+// returns 'completed_late' rather than 'completed_on_time' - a deliberate,
+// conservative choice: an export is a Manager-facing report, and silently
+// marking an indeterminate row as SLA-compliant risks hiding a problem,
+// while flagging it as late merely risks one row being double-checked.
+function classifyExportSlaStatus(requestDoc, now = new Date()) {
+  const bucket = classifySlaBucket(requestDoc, now);
+  if (bucket !== 'completed') {
+    return bucket;
+  }
+
+  const completionTimestamp = requestDoc.resolvedAt || requestDoc.closedAt || requestDoc.cancelledAt || null;
+  if (!completionTimestamp) {
+    return 'completed_late';
+  }
+
+  const dueTime = new Date(requestDoc.slaDueAt).getTime();
+  const completedTime = new Date(completionTimestamp).getTime();
+  return completedTime <= dueTime ? 'completed_on_time' : 'completed_late';
+}
+
+const SLA_EXPORT_STATUS_VALUES = [
+  'on_track', 'due_soon', 'overdue', 'completed_on_time', 'completed_late', 'unavailable',
+];
+
 module.exports = {
   SLA_HOURS_BY_PRIORITY,
   ACTIVE_SLA_STATUSES,
   DUE_SOON_WINDOW_MINUTES,
   SLA_STATUS_VALUES,
+  SLA_EXPORT_STATUS_VALUES,
   isValidSlaPriority,
   calculateSlaDueAt,
   computeSlaSummary,
   buildSlaStatusQuery,
   classifySlaBucket,
+  classifyExportSlaStatus,
 };

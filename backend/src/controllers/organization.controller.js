@@ -7,9 +7,31 @@ const { generateUniqueCompanyCode } = require('../utils/companyCode');
 const { ensureDefaultServiceCategories } = require('../utils/defaultServiceCategories');
 const { sanitizeUser, SALT_ROUNDS, EMAIL_REGEX } = require('./auth.controller');
 const { validatePassword } = require('../utils/passwordPolicy');
+// DOC-64 - "Audit Log". Every write in this file that is a real
+// administrative action (Organization lifecycle, Manager assignment/
+// replacement) records one AuditLog entry AFTER its own business write has
+// already succeeded - never before, never conditionally blocking the
+// response on it (see services/auditLog.service.js's own top comment on
+// failure strategy). This never replaces or duplicates anything - none of
+// these calls touch RequestActivity/Notification, and this controller has
+// no Request-related logic to begin with.
+const { recordAuditLog } = require('../services/auditLog.service');
 
 const MIN_NAME_LENGTH = 2;
 const MAX_NAME_LENGTH = 100;
+// DOC-61 - "Organization Settings for Manager". Bounds for the three new
+// optional profile fields - see models/Organization.js's own comment for
+// why these three, and only these three, exist at all.
+const MAX_DESCRIPTION_LENGTH = 1000;
+const MAX_CONTACT_PHONE_LENGTH = 30;
+// Deliberately permissive (task spec section 19): digits, a leading `+`,
+// spaces, parentheses, and hyphens - enough to represent most real-world
+// international formats ("+1 (555) 123-4567", "020-7946-0958",
+// "+972 50-123-4567") without hard-coding any single country's own
+// numbering plan. At least one digit is required (a phone number that is
+// entirely punctuation/whitespace is not a phone number) - anything else
+// is rejected, not silently accepted.
+const CONTACT_PHONE_PATTERN = /^[0-9+\-()\s]+$/;
 
 // Fields a System Admin may change through PATCH /api/organizations/:id.
 // Anything else in the request body (companyCode, createdBy, managerId,
@@ -56,6 +78,17 @@ const sanitizeOrganization = (org, extras = {}) => ({
   manager: extras.manager !== undefined ? extras.manager : null,
   employeeCount: extras.employeeCount,
   operatorCount: extras.operatorCount,
+  // DOC-61 - "Organization Settings for Manager". Included in EVERY
+  // Organization response uniformly (System Admin's list/detail/update
+  // endpoints too, not just GET/PATCH /me) - one shared response shape,
+  // never a second, Manager-only variant. `|| null` (never `undefined`)
+  // for a historical Organization created before this ticket, so the
+  // frontend always receives a real, predictable value to render as an
+  // empty field rather than needing its own "field might not exist yet"
+  // handling.
+  description: org.description || null,
+  contactEmail: org.contactEmail || null,
+  contactPhone: org.contactPhone || null,
   createdAt: org.createdAt,
   updatedAt: org.updatedAt,
 });
@@ -135,6 +168,92 @@ const validateName = (name) => {
   }
   return null;
 };
+
+// DOC-61 - "Organization Settings for Manager". Three new validators,
+// mirroring `validateName`'s own shape exactly (a pure function returning
+// either `null` - valid - or a client-safe error string). All three
+// fields are OPTIONAL (task spec section 3/25: "description: optional",
+// "contactEmail: optional", "contactPhone: optional") - `null`/`undefined`/
+// an empty (or whitespace-only) string are all valid ways to say "no
+// value", and are normalized to `null` by the caller
+// (`updateMyOrganization` below), never stored as `''`. A non-string
+// value (array/object/number/boolean) is always rejected outright (task
+// spec: "Reject object/array payloads where strings expected.") - this is
+// checked BEFORE anything else, so `{}.trim is not a function` can never
+// happen here.
+const validateDescription = (description) => {
+  if (description === null || description === undefined) {
+    return null;
+  }
+  if (typeof description !== 'string') {
+    return 'Description must be text.';
+  }
+  if (description.trim().length > MAX_DESCRIPTION_LENGTH) {
+    return `Description must be at most ${MAX_DESCRIPTION_LENGTH} characters.`;
+  }
+  return null;
+};
+
+// Reuses this file's own already-imported `EMAIL_REGEX` (from
+// auth.controller.js) - the SAME format rule Login/Register/every other
+// email field in this project already uses, never a second, slightly
+// different email regex. This is presentation-only contact information,
+// not a login identity (task spec section 18) - it is never checked
+// against `User.email` for uniqueness, and never written to any `User`
+// document.
+const validateContactEmail = (contactEmail) => {
+  if (contactEmail === null || contactEmail === undefined || contactEmail === '') {
+    return null;
+  }
+  if (typeof contactEmail !== 'string') {
+    return 'Contact email must be text.';
+  }
+  if (!EMAIL_REGEX.test(contactEmail.trim())) {
+    return 'Please provide a valid contact email address.';
+  }
+  return null;
+};
+
+// Deliberately permissive (task spec section 19) - see
+// CONTACT_PHONE_PATTERN's own comment above for exactly which characters
+// are allowed and why.
+const validateContactPhone = (contactPhone) => {
+  if (contactPhone === null || contactPhone === undefined || contactPhone === '') {
+    return null;
+  }
+  if (typeof contactPhone !== 'string') {
+    return 'Contact phone must be text.';
+  }
+  const trimmed = contactPhone.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  if (trimmed.length > MAX_CONTACT_PHONE_LENGTH) {
+    return `Contact phone must be at most ${MAX_CONTACT_PHONE_LENGTH} characters.`;
+  }
+  if (!CONTACT_PHONE_PATTERN.test(trimmed) || !/\d/.test(trimmed)) {
+    return 'Please provide a valid contact phone number.';
+  }
+  return null;
+};
+
+// DOC-61 - the explicit, clearly-rejected denylist (task spec section 9:
+// "Prefer rejecting forbidden fields clearly where practical.") for
+// PATCH /api/organizations/me. Checked BEFORE any allowed field is even
+// looked at, so a request mixing a legitimate field with a forged one
+// (e.g. `{ name: "New Name", isActive: false }`) is rejected outright
+// with a clear, specific message - never silently split into "apply the
+// good part, ignore the bad part". `organizationId`/`_id`/`id` are
+// included even though this endpoint never reads a target id from the
+// body at all (the Organization is always `req.user.organizationId` -
+// task spec section 8/12) - purely defensive, so a client attempting to
+// influence WHICH Organization is updated via the body gets an explicit,
+// clear rejection rather than having that field silently ignored with no
+// feedback at all.
+const FORBIDDEN_ORGANIZATION_SELF_UPDATE_FIELDS = [
+  'companyCode', 'isActive', 'createdAt', 'updatedAt', 'createdBy', 'manager',
+  'managerId', 'organizationId', '_id', 'id', 'users',
+];
 
 // Maps a MongoDB duplicate-key error to which field actually collided, so
 // the client gets an accurate message instead of a generic one. Falls back
@@ -329,6 +448,25 @@ const createOrganization = async (req, res, next) => {
       return next(categoryError);
     }
 
+    // DOC-64 - "Audit Log". Recorded AFTER the Organization is fully
+    // created (and, in the branch below, after its Manager is fully
+    // linked) - never before, never blocking this response on it (see
+    // services/auditLog.service.js's own failure-strategy comment). One
+    // ORGANIZATION_CREATED event either way; a SEPARATE MANAGER_ASSIGNED
+    // event only when an initial Manager was actually created in the same
+    // call (task spec section 13: "Prefer one meaningful audit event per
+    // administrative action" - creating an Organization and assigning its
+    // first Manager are two distinct facts, even when they happen in one
+    // HTTP request).
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: organization._id,
+      action: 'ORGANIZATION_CREATED',
+      targetType: 'Organization',
+      targetId: organization._id,
+      metadata: { organizationName: organization.name },
+    });
+
     if (!managerInput) {
       return res.status(201).json({
         status: 'success',
@@ -342,6 +480,15 @@ const createOrganization = async (req, res, next) => {
 
     try {
       const manager = await createAndLinkManager(organization, managerInput);
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: organization._id,
+        action: 'MANAGER_ASSIGNED',
+        targetType: 'Organization',
+        targetId: organization._id,
+        changes: { manager: { from: null, to: manager.fullName } },
+        metadata: { organizationName: organization.name, managerId: manager._id, managerName: manager.fullName },
+      });
       return res.status(201).json({
         status: 'success',
         data: sanitizeOrganization(organization, {
@@ -404,6 +551,167 @@ const getMyOrganization = async (req, res, next) => {
 
     return res.status(200).json({ status: 'success', data: await enrichOrganization(organization) });
   } catch (error) {
+    return next(error);
+  }
+};
+
+// PATCH /api/organizations/me (manager only)
+//
+// DOC-61 - "Organization Settings for Manager". The Manager-only
+// counterpart to GET /me above, reusing the identical "derive the target
+// Organization exclusively from req.user.organizationId" contract - this
+// route has no :id, no organizationId is ever read from the body/query,
+// and it is therefore structurally incapable of updating any Organization
+// other than the caller's own (task spec section 8/12: "Do NOT make
+// Manager send organizationId... Manager A must NOT update Organization B
+// by changing URL/body/query."). Registered with its own `requireRole
+// ('manager')` chain (see routes/organization.routes.js) - Employee/
+// Operator tokens never reach this function at all, and System Admin
+// (whose organizationId is always null) would 404 here the same way it
+// does on GET /me, though it never needs to: System Admin's own,
+// separate PATCH /api/organizations/:id is completely unaffected by this
+// endpoint (task spec section 11 - "System Admin behavior unchanged").
+//
+// SECURITY - explicit allowlist, never mass assignment (task spec section
+// 9/10): only `name`/`description`/`contactEmail`/`contactPhone` are ever
+// read from the body. `FORBIDDEN_ORGANIZATION_SELF_UPDATE_FIELDS` is
+// checked FIRST and rejects the entire request (400) if the body contains
+// any of companyCode/isActive/createdAt/updatedAt/createdBy/manager/
+// managerId/organizationId/_id/id/users - never silently ignored, never
+// partially applied. This project already has an established, audited-safe
+// pattern for exactly this shape (`updateOrganization` above, System
+// Admin's own PATCH /:id) - this function deliberately mirrors it (build
+// `updates` explicitly, then `Object.assign(organization, updates)` -
+// never `Object.assign(organization, req.body)`) rather than inventing a
+// second way to safely update an Organization document.
+//
+// DOC-64 AUDIT LOG READINESS (task spec section 22, explicitly NOT built
+// here): this function is intentionally small and linear - validate,
+// build `updates`, save, respond - specifically so a future DOC-64 change
+// can insert one `recordAuditLogEntry(...)` call after the `.save()`
+// below (mirroring how services/requestActivity.service.js's
+// `recordRequestActivity` is called from request.controller.js) without
+// needing to restructure this function at all.
+const UPDATABLE_SELF_FIELDS = ['name', 'description', 'contactEmail', 'contactPhone'];
+
+const updateMyOrganization = async (req, res, next) => {
+  try {
+    if (!req.user.organizationId) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'You are not associated with an Organization.',
+      });
+    }
+
+    const body = req.body || {};
+
+    const forbiddenField = FORBIDDEN_ORGANIZATION_SELF_UPDATE_FIELDS.find(
+      (field) => Object.prototype.hasOwnProperty.call(body, field),
+    );
+    if (forbiddenField) {
+      return res.status(400).json({
+        status: 'error',
+        message: `${forbiddenField} cannot be updated through this endpoint.`,
+      });
+    }
+
+    const updates = {};
+
+    if (Object.prototype.hasOwnProperty.call(body, 'name')) {
+      const nameError = validateName(body.name);
+      if (nameError) {
+        return res.status(400).json({ status: 'error', message: nameError });
+      }
+      updates.name = body.name.trim();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'description')) {
+      const descriptionError = validateDescription(body.description);
+      if (descriptionError) {
+        return res.status(400).json({ status: 'error', message: descriptionError });
+      }
+      const trimmed = typeof body.description === 'string' ? body.description.trim() : body.description;
+      updates.description = trimmed || null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'contactEmail')) {
+      const contactEmailError = validateContactEmail(body.contactEmail);
+      if (contactEmailError) {
+        return res.status(400).json({ status: 'error', message: contactEmailError });
+      }
+      const trimmed = typeof body.contactEmail === 'string' ? body.contactEmail.trim().toLowerCase() : body.contactEmail;
+      updates.contactEmail = trimmed || null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'contactPhone')) {
+      const contactPhoneError = validateContactPhone(body.contactPhone);
+      if (contactPhoneError) {
+        return res.status(400).json({ status: 'error', message: contactPhoneError });
+      }
+      const trimmed = typeof body.contactPhone === 'string' ? body.contactPhone.trim() : body.contactPhone;
+      updates.contactPhone = trimmed || null;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({
+        status: 'error',
+        message: `No valid fields to update. Allowed fields: ${UPDATABLE_SELF_FIELDS.join(', ')}.`,
+      });
+    }
+
+    const organization = await Organization.findById(req.user.organizationId);
+    if (!organization) {
+      return res.status(404).json({ status: 'error', message: 'Organization not found.' });
+    }
+
+    // DOC-64 - captured BEFORE Object.assign, one snapshot per field that
+    // is actually PRESENT in `updates` (never every field on the document -
+    // task spec section 9/22: "Do not store unchanged values" /
+    // "Store only fields that actually changed").
+    const previousValues = {};
+    Object.keys(updates).forEach((field) => {
+      previousValues[field] = organization[field];
+    });
+
+    Object.assign(organization, updates);
+    await organization.save();
+
+    // DOC-64 - "Audit Log" (task spec section 22). Only fields whose value
+    // GENUINELY changed end up in `changes` - re-sending the exact same
+    // value for a field (a safe no-op the controller above already
+    // allows) never produces a misleading "from X to X" audit entry, and a
+    // request where every touched field's new value equals its old one
+    // (a technically valid "no-op save") records no audit entry at all
+    // (task spec section 43 item 32: "unchanged name creates no log" - the
+    // same principle DOC-62's own Profile audit entry below follows too).
+    const settingsChanges = {};
+    Object.keys(updates).forEach((field) => {
+      const before = previousValues[field];
+      const after = organization[field];
+      if (before !== after) {
+        settingsChanges[field] = { from: before, to: after };
+      }
+    });
+    if (Object.keys(settingsChanges).length > 0) {
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: organization._id,
+        action: 'ORGANIZATION_SETTINGS_UPDATED',
+        targetType: 'Organization',
+        targetId: organization._id,
+        changes: settingsChanges,
+        metadata: { organizationName: organization.name },
+      });
+    }
+
+    return res.status(200).json({ status: 'success', data: await enrichOrganization(organization) });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ status: 'error', message: duplicateKeyMessage(error) });
+    }
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ status: 'error', message: error.message });
+    }
     return next(error);
   }
 };
@@ -482,8 +790,44 @@ const updateOrganization = async (req, res, next) => {
       return res.status(404).json({ status: 'error', message: 'Organization not found.' });
     }
 
+    // DOC-64 - captured BEFORE Object.assign overwrites them, so the audit
+    // entry below can show a real before/after diff rather than reading
+    // the already-mutated in-memory document.
+    const previousName = organization.name;
+    const previousIsActive = organization.isActive;
+
     Object.assign(organization, updates);
     await organization.save();
+
+    // DOC-64 - "Audit Log". A single PATCH here may legitimately change
+    // `name` and/or `isActive` in one request (both are on UPDATABLE_FIELDS)
+    // - each is its own distinct administrative fact (task spec section 13),
+    // so up to two separate audit events are recorded for one HTTP call:
+    // ORGANIZATION_UPDATED for a name change, and ORGANIZATION_ACTIVATED/
+    // DEACTIVATED for a status change - never a single vague "organization
+    // updated" event that hides which of the two actually happened.
+    if (Object.prototype.hasOwnProperty.call(updates, 'name') && previousName !== organization.name) {
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: organization._id,
+        action: 'ORGANIZATION_UPDATED',
+        targetType: 'Organization',
+        targetId: organization._id,
+        changes: { name: { from: previousName, to: organization.name } },
+        metadata: { organizationName: organization.name },
+      });
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, 'isActive') && previousIsActive !== organization.isActive) {
+      recordAuditLog({
+        actorId: req.user.userId,
+        organizationId: organization._id,
+        action: organization.isActive ? 'ORGANIZATION_ACTIVATED' : 'ORGANIZATION_DEACTIVATED',
+        targetType: 'Organization',
+        targetId: organization._id,
+        changes: { isActive: { from: previousIsActive, to: organization.isActive } },
+        metadata: { organizationName: organization.name },
+      });
+    }
 
     return res.status(200).json({ status: 'success', data: await enrichOrganization(organization) });
   } catch (error) {
@@ -528,6 +872,20 @@ const regenerateCompanyCode = async (req, res, next) => {
     organization.companyCode = newCompanyCode;
     await organization.save();
 
+    // DOC-64 - "Audit Log". Task spec sections 8/15 - CRITICAL: the actual
+    // old/new companyCode values are deliberately NEVER stored here, only
+    // the fact that a regeneration happened. This collection must never
+    // become a secondary store of onboarding codes.
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: organization._id,
+      action: 'COMPANY_CODE_REGENERATED',
+      targetType: 'Organization',
+      targetId: organization._id,
+      changes: { companyCodeChanged: true },
+      metadata: { organizationName: organization.name },
+    });
+
     return res.status(200).json({ status: 'success', data: await enrichOrganization(organization) });
   } catch (error) {
     if (error.code === 11000) {
@@ -570,6 +928,20 @@ const assignManager = async (req, res, next) => {
     }
 
     const manager = await createAndLinkManager(organization, req.body);
+
+    // DOC-64 - "Audit Log". Same MANAGER_ASSIGNED shape createOrganization's
+    // own inline-manager branch already records above - this is simply the
+    // OTHER call site that produces the same real-world fact ("an initial
+    // Manager was assigned to this Organization").
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: organization._id,
+      action: 'MANAGER_ASSIGNED',
+      targetType: 'Organization',
+      targetId: organization._id,
+      changes: { manager: { from: null, to: manager.fullName } },
+      metadata: { organizationName: organization.name, managerId: manager._id, managerName: manager.fullName },
+    });
 
     return res.status(201).json({
       status: 'success',
@@ -741,6 +1113,31 @@ const replaceManager = async (req, res, next) => {
       await oldManager.save();
     }
 
+    // DOC-64 - "Audit Log". `changes.manager` shows safe identities only
+    // (task spec section 16: "previous manager id/name, new manager
+    // id/name. Never password information.") - `oldManager` may be `null`
+    // here in the defensive edge case above, so this falls back to a safe
+    // placeholder rather than throwing.
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: organization._id,
+      action: 'MANAGER_REPLACED',
+      targetType: 'Organization',
+      targetId: organization._id,
+      changes: {
+        manager: {
+          from: oldManager ? oldManager.fullName : 'Unknown manager',
+          to: newManager.fullName,
+        },
+      },
+      metadata: {
+        organizationName: organization.name,
+        previousManagerId: oldManagerId,
+        newManagerId: newManager._id,
+        newManagerName: newManager.fullName,
+      },
+    });
+
     return res.status(200).json({
       status: 'success',
       data: await enrichOrganization(organization),
@@ -799,6 +1196,26 @@ const deleteOrganization = async (req, res, next) => {
     }
 
     await Organization.deleteOne({ _id: organization._id });
+
+    // DOC-64 - "Audit Log". `ORGANIZATION_DELETED` is not on the task
+    // spec's own "at minimum consider" enum list, but this is real,
+    // existing, high-consequence administrative functionality (DOC-47's
+    // hard delete) that the task spec explicitly asked this audit to
+    // inspect ("any Organization deletion behavior if it exists") - a
+    // deliberate, justified addition, not scope creep. `organizationId` is
+    // still set to the just-deleted Organization's own id (it existed and
+    // was affected at the moment of this action, even though the document
+    // itself is now gone) - the read API's own target-resolution already
+    // degrades gracefully for a target that no longer exists (see
+    // controllers/auditLog.controller.js's own `resolveTargetDisplayName`).
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: organization._id,
+      action: 'ORGANIZATION_DELETED',
+      targetType: 'Organization',
+      targetId: organization._id,
+      metadata: { organizationName: organization.name },
+    });
 
     // Same response shape as every other endpoint in this file
     // ({status, data}) rather than a bare 204 - kept consistent with the
@@ -863,6 +1280,7 @@ module.exports = {
   listOrganizations,
   getOrganization,
   getMyOrganization,
+  updateMyOrganization,
   updateOrganization,
   regenerateCompanyCode,
   assignManager,
@@ -872,4 +1290,5 @@ module.exports = {
   getOrganizationStatistics,
   sanitizeOrganization,
   UPDATABLE_FIELDS,
+  UPDATABLE_SELF_FIELDS,
 };
