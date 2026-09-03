@@ -157,6 +157,14 @@ function Login() {
             {errors.password && <span className="form-error">{errors.password}</span>}
           </div>
 
+          {/* DOC-70 - "Forgot Password / Password Recovery via Manager
+              Approval". Placed directly under the form fields, above the
+              submit button - a person who cannot log in should see this
+              before, not after, trying (and failing) to submit. */}
+          <p className="auth-forgot-password-link">
+            <Link to="/forgot-password">Forgot Password?</Link>
+          </p>
+
           <div className="form-actions">
             <button type="submit" className="btn btn-primary btn-block" disabled={isSubmitting}>
               {isSubmitting ? 'Logging in...' : 'Login'}

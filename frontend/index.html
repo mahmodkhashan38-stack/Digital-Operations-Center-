@@ -6,6 +6,31 @@
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <title>Digital Operations Center</title>
+    <!-- DOC-77 - "Theme Switcher / Appearance Customization" (task spec
+         section 5: "Avoid a visible flash of the wrong theme during
+         startup... apply the saved theme as early as practical before the
+         main application visibly renders"). This tiny, synchronous,
+         inline script is the ONLY thing that runs before the first paint
+         - main.jsx/React haven't even started loading yet at this point
+         (the module script below is deferred by the browser until after
+         this parses). It duplicates the same 3-line "read localStorage,
+         validate, apply data-theme" logic ThemeContext.jsx uses for every
+         later change (see that file's own comment) - kept in careful sync
+         with it, but necessarily a separate copy, since nothing from
+         src/ can run this early. Wrapped in try/catch so a
+         localStorage-disabled browser still renders (falling back to the
+         existing dark identity) rather than breaking startup entirely. -->
+    <script>
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('doc_theme');
+          var theme = stored === 'light' ? 'light' : 'dark';
+          document.documentElement.setAttribute('data-theme', theme);
+        } catch (error) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -4,6 +4,7 @@ import RequestSlaBadge from './RequestSlaBadge.jsx';
 import RequestNumberBadge from './RequestNumberBadge.jsx';
 import AuthenticatedRequestImage from './AuthenticatedRequestImage.jsx';
 import RequestActivityTimeline from './RequestActivityTimeline.jsx';
+import RequestRatingSection from './RequestRatingSection.jsx';
 import { PRIORITY_LABELS } from '../utils/requestLabels.js';
 
 // DOC-11 - a single row in the Employee Dashboard's "My Requests" table,
@@ -1011,6 +1012,20 @@ function RequestRow({
                   </p>
                 )}
               </div>
+
+              {/* DOC-68 - "Employee Satisfaction Rating". Employee-only
+                  (never Operator - task spec's own "Managers/Operators may
+                  never rate on the Employee's behalf" rule), and only once
+                  the Request has reached its terminal 'closed' state -
+                  never open/in_progress/resolved/reopened/cancelled. This
+                  same RequestRow.jsx also renders for Operator dashboards
+                  (viewerRole === 'operator' - see this file's own top
+                  comment), so the viewerRole check here is required, not
+                  redundant, even though the backend independently enforces
+                  the exact same eligibility server-side. */}
+              {viewerRole === 'employee' && request.status === 'closed' && (
+                <RequestRatingSection requestId={request.id} />
+              )}
 
               {/* DOC-17 - self-contained, fetches on its own the moment this
                   panel is expanded; no new props/state needed on this row. */}

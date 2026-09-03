@@ -204,7 +204,55 @@ function NotificationBell() {
       }
     }
     setIsOpen(false);
-    if (notification.requestId) {
+    // DOC-72 - "@Mentions in Organization Chat" (task spec section 23:
+    // "Clicking the Notification should take user to: Organization
+    // Chat... Prefer: /chat"). A CHAT_MENTION notification has no
+    // `requestId` at all (it is not Request-related - see models/
+    // Notification.js's own DOC-72 comment), so it needs its own branch
+    // here rather than falling into the Request-destination logic below.
+    // Task spec: "Do NOT overbuild message-anchor scrolling if not
+    // already supported" - this project has no scroll-to-message
+    // mechanism, so this intentionally just opens the chat page, exactly
+    // like `metadata.chatMessageId` being present-but-unused today; a
+    // future enhancement could read it to scroll once that capability
+    // exists, without any change needed here.
+    if (notification.type === 'CHAT_MENTION') {
+      navigate('/chat');
+    } else if (notification.type === 'DIRECT_MESSAGE') {
+      // DOC-73 - "Private Direct Messages" (task spec section 42: "Click
+      // should navigate to: /messages... Prefer passing conversationId
+      // through safe navigation metadata if current architecture
+      // supports it."). This project has no query-param deep-link
+      // mechanism for "open this one conversation" (the same limitation
+      // CHAT_MENTION's own comment above already documents for messages)
+      // - `metadata.conversationId` is present but intentionally unused
+      // today, exactly like CHAT_MENTION's own `chatMessageId`, ready for
+      // a future scroll-to-conversation enhancement without any change
+      // needed here (task spec: "Do not overbuild message-anchor
+      // scrolling if not already supported").
+      navigate('/messages');
+    } else if (notification.type === 'POLICY_PUBLISHED' || notification.type === 'POLICY_UPDATED') {
+      // DOC-74 - "Organization Policies & Guidelines" (task spec: "click
+      // navigates to /policies, optionally include policyId in metadata
+      // for future anchor navigation - don't overbuild"). Same shape as
+      // CHAT_MENTION/DIRECT_MESSAGE above: `metadata.policyId` is present
+      // but intentionally unused today, ready for a future scroll/open-
+      // detail enhancement without any change needed here.
+      navigate('/policies');
+    } else if (notification.type === 'KNOWLEDGE_ANSWER_ADDED' || notification.type === 'KNOWLEDGE_ANSWER_ACCEPTED') {
+      // DOC-75 - "Organization Q&A / Knowledge Board" (task spec section
+      // 33: "Click should navigate to: /knowledge and ideally open
+      // questionId if current navigation system supports metadata. Do
+      // not overbuild scroll-anchor behavior."). Unlike CHAT_MENTION/
+      // DIRECT_MESSAGE/POLICY_PUBLISHED above, this project's own
+      // Knowledge.jsx DOES support a simple `?questionId=` query param to
+      // auto-open a specific question's detail view on load (see that
+      // file's own comment) - a plain URL query param, not a scroll-
+      // anchor or a new routing mechanism, so this satisfies the "ideally
+      // open questionId" hint without overbuilding.
+      const questionId = notification.metadata && notification.metadata.questionId;
+      navigate(questionId ? `/knowledge?questionId=${questionId}` : '/knowledge');
+    } else if (notification.requestId) {
       navigate(destinationForRole(user?.role));
     }
   };

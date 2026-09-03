@@ -98,12 +98,65 @@ const validateAssignmentReason = (reason) => {
   return null;
 };
 
+// DOC-68 - "Employee Satisfaction Rating". Backend-authoritative score
+// validation (task spec section 12): accepts ONLY an actual integer
+// Number in [1, 5] - never a numeric string ("5"), a decimal (2.5), an
+// array/object, or a NaN-like value. `typeof score !== 'number'` rejects
+// a string before `Number.isInteger` is even consulted (Number.isInteger
+// itself already returns `false` for a string, an array, an object, and
+// `NaN`, but the explicit typeof check documents the intent and matches
+// this file's own "reject the wrong type before inspecting the value"
+// style used by validateTitle/validateDescription above).
+const MIN_SCORE = 1;
+const MAX_SCORE = 5;
+
+const validateScore = (score) => {
+  if (typeof score !== 'number' || !Number.isInteger(score)) {
+    return `score must be a whole number between ${MIN_SCORE} and ${MAX_SCORE}.`;
+  }
+  if (score < MIN_SCORE || score > MAX_SCORE) {
+    return `score must be a whole number between ${MIN_SCORE} and ${MAX_SCORE}.`;
+  }
+  return null;
+};
+
+// Optional plain-text feedback (task spec section 3/13). `undefined`/`''`/
+// whitespace-only are all valid "no comment given" states - normalized to
+// `null` by the caller (requestRating.controller.js), never rejected here;
+// this function only rejects a genuinely WRONG type (object/array/number)
+// or a comment that is present but too long. Trimming happens here so the
+// caller always receives either `null` (no comment) or an already-trimmed
+// string ready to store as-is - never raw HTML, since this is a plain
+// string field with no markup interpretation anywhere in this project
+// (React renders it as text, never via dangerouslySetInnerHTML - task
+// spec section 13/32).
+const MAX_RATING_COMMENT_LENGTH = 500;
+
+const validateRatingComment = (comment) => {
+  if (comment === undefined || comment === null || comment === '') {
+    return { error: null, value: null };
+  }
+  if (typeof comment !== 'string') {
+    return { error: 'comment must be a string.', value: null };
+  }
+  const trimmed = comment.trim();
+  if (trimmed.length === 0) {
+    return { error: null, value: null };
+  }
+  if (trimmed.length > MAX_RATING_COMMENT_LENGTH) {
+    return { error: `comment must be at most ${MAX_RATING_COMMENT_LENGTH} characters.`, value: null };
+  }
+  return { error: null, value: trimmed };
+};
+
 module.exports = {
   validateTitle,
   validateDescription,
   validatePriority,
   validateCancelReason,
   validateAssignmentReason,
+  validateScore,
+  validateRatingComment,
   MIN_TITLE_LENGTH,
   MAX_TITLE_LENGTH,
   MIN_DESCRIPTION_LENGTH,
@@ -112,4 +165,7 @@ module.exports = {
   MAX_CANCEL_REASON_LENGTH,
   MIN_ASSIGNMENT_REASON_LENGTH,
   MAX_ASSIGNMENT_REASON_LENGTH,
+  MIN_SCORE,
+  MAX_SCORE,
+  MAX_RATING_COMMENT_LENGTH,
 };

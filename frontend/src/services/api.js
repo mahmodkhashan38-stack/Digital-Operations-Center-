@@ -137,6 +137,43 @@ export const authApi = {
   // requirePasswordChangeCompleted.js - this route never has that
   // middleware composed into its chain at all).
   changePassword: (payload, token) => request('/auth/change-password', { method: 'PATCH', body: payload, token }),
+  // DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
+  // PUBLIC - no token, same shape as register/login above. `payload` is
+  // always exactly { email, companyCode } - this project has no email
+  // delivery, so the response is always a safe, generic status message,
+  // never a token or account data (see backend's forgotPassword for the
+  // full enumeration-resistance contract).
+  forgotPassword: (payload) => request('/auth/forgot-password', { method: 'POST', body: payload }),
+  // DOC-69 - "Login History & Active Sessions". Revokes the CURRENT
+  // server-side session before AuthContext.jsx clears the local token -
+  // see that file's own `logout` for why this is wrapped in a try/catch
+  // there rather than here (a network failure must never prevent the
+  // person from clearing their own local session).
+  logout: (token) => request('/auth/logout', { method: 'POST', token }),
+};
+
+// DOC-69 - "Login History & Active Sessions". Reachable by any
+// authenticated, non-forced-change role - every endpoint here is scoped
+// server-side to the caller's OWN sessions only (never another user's,
+// regardless of role - see backend/src/controllers/userSession.
+// controller.js's own top comment). No payload ever includes a
+// `tokenId`/`jti`/organizationId - this client never has one to send in
+// the first place (the backend never returns one - see that controller's
+// own `sanitizeSession`).
+export const sessionApi = {
+  // Returns up to the 30 most recent sessions (active + historical),
+  // newest first, each already carrying its own computed `status`
+  // ('ACTIVE'/'REVOKED'/'EXPIRED') and `isCurrent` flag - this client
+  // never re-derives either of those itself.
+  list: (token) => request('/auth/sessions', { method: 'GET', token }),
+  // Revokes exactly one of the caller's own sessions. `sessionId` is an
+  // opaque id from a previous `list()` response - never a raw tokenId/JWT
+  // (this client never has one). Revoking the current session is allowed
+  // by the backend; the caller (Profile.jsx) checks the returned
+  // `isCurrent` flag and immediately performs a local logout when it is.
+  revoke: (sessionId, token) => request(`/auth/sessions/${sessionId}`, { method: 'DELETE', token }),
+  logoutOthers: (token) => request('/auth/sessions/logout-others', { method: 'POST', token }),
+  logoutAll: (token) => request('/auth/sessions/logout-all', { method: 'POST', token }),
 };
 
 // DOC-62 - "User Profile". `updateMine` is the ONE new call this ticket
@@ -151,7 +188,33 @@ export const authApi = {
 // context, exactly like `organizationApi.updateMine` (DOC-61) already does
 // for Organization Settings.
 export const userSelfApi = {
+  // `updates` may now also include `bio` (DOC-71) alongside `fullName` -
+  // same self-scoped, explicit-whitelist contract: the backend rejects
+  // (400) anything else outright, even if this client were to send it (it
+  // never does), and derives the target user entirely from the
+  // authenticated caller's own token, never from anything sent here.
   updateMine: (updates, token) => request('/users/me', { method: 'PATCH', body: updates, token }),
+  // DOC-71 - "Enhanced User Profile: Profile Picture + Bio". `file` is a
+  // single File/Blob from an `<input type="file">` - wrapped in FormData
+  // under the field name `profileImage`, the exact field name the backend
+  // Multer middleware (`uploadMemory.single('profileImage')` - see
+  // routes/user.routes.js) expects. No userId is ever sent - this always
+  // targets the caller's OWN image (POST /users/me/profile-image), the
+  // backend derives the target entirely from the token, never from a URL
+  // param (task spec section 10). The response's `data` is the caller's
+  // full freshly-sanitized user object (same shape `authApi.login`/
+  // `userSelfApi.updateMine` already return), ready to hand directly to
+  // AuthContext's `updateUser` with no separate GET /auth/me round trip.
+  uploadProfileImage: (file, token) => {
+    const formData = new FormData();
+    formData.append('profileImage', file);
+    return request('/users/me/profile-image', { method: 'POST', body: formData, token });
+  },
+  // No body - clears the caller's own current profile image (idempotent
+  // on the backend: calling this with no image already set still returns
+  // a normal 200 success, never an error - see userProfileImage.
+  // controller.js's own deleteMyProfileImage).
+  deleteProfileImage: (token) => request('/users/me/profile-image', { method: 'DELETE', token }),
 };
 
 // Organization-management API calls (DOC-32/DOC-34/DOC-41). Every one of
@@ -252,6 +315,26 @@ export const userApi = {
   // never receives one anyway - see OrganizationUserRow.jsx's own
   // comment).
   resetPassword: (id, payload, token) => request(`/users/${id}/reset-password`, { method: 'PATCH', body: payload, token }),
+  // DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
+  // Manager-only, own Organization only (backend-enforced) - see
+  // routes/user.routes.js. `status` is optional; omitted, the backend
+  // returns every request (newest first) so the Manager can see history,
+  // not just the current pending queue.
+  listPasswordResetRequests: (token, status) => request(
+    `/users/password-reset-requests${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+    { method: 'GET', token },
+  ),
+  // `payload` is always exactly { newPassword, confirmPassword } - the
+  // same shape resetPassword above already sends, since this ultimately
+  // performs the exact same backend reset mechanism.
+  approvePasswordResetRequest: (id, payload, token) => request(
+    `/users/password-reset-requests/${id}/approve`,
+    { method: 'PATCH', body: payload, token },
+  ),
+  rejectPasswordResetRequest: (id, token) => request(
+    `/users/password-reset-requests/${id}/reject`,
+    { method: 'PATCH', token },
+  ),
 };
 
 // Service Category management API calls (DOC-43). Manager-only on the
@@ -515,6 +598,23 @@ export const requestApi = {
   // every other endpoint here. Returns activity events oldest-first,
   // ready to render directly with no client-side re-sorting.
   getActivities: (id, token) => request(`/requests/${id}/activities`, { method: 'GET', token }),
+  // DOC-68 - "Employee Satisfaction Rating". Employee-only on the backend
+  // (must be the Request's own creator, and only once the Request is
+  // 'closed' - see requestRating.controller.js's own loadOwnClosedRequestOrRespondLookup).
+  // `submitRating` only ever sends `{ score, comment }` - employeeId/
+  // operatorId/organizationId/requestId/createdAt are always
+  // server-derived, never sent from here (matches every other create call
+  // in this file). `getMyRating` returns `{ status: 'success', data: null }`
+  // (never a 404) when the caller has not rated this Request yet - that is
+  // a normal, expected response here, not an error to catch.
+  submitRating: (id, { score, comment }, token) => request(`/requests/${id}/rating`, { method: 'POST', body: { score, comment }, token }),
+  getMyRating: (id, token) => request(`/requests/${id}/rating`, { method: 'GET', token }),
+  // Manager-only on the backend. `params` may include `{ limit, before,
+  // score, operator, createdFrom, createdTo }`, all optional - reuses the
+  // exact same query-string builder every other filtered/paginated call in
+  // this file already uses. Always scoped server-side to the caller's own
+  // Organization regardless of any filter passed here.
+  listOrganizationRatings: (token, params) => request(`/requests/ratings/organization${buildRequestQueryString(params)}`, { method: 'GET', token }),
 };
 
 // Comment API calls (DOC-13, create + view only - no edit/delete). Reachable
@@ -536,12 +636,48 @@ export const commentApi = {
 // builder every other paginated/filterable call in this file already
 // uses - `params` is `{ before, limit }`, both optional; omitting either
 // (or passing `{}`) gets the backend's own default (newest 50 messages).
-// `send` only ever transmits `{ content }` - organizationId/authorId/
-// role/createdAt/updatedAt are all always server-derived, never sent from
-// here (see chat.controller.js's own explicit allowlist).
+// organizationId/authorId/role/createdAt/updatedAt are all always
+// server-derived, never sent from here (see chat.controller.js's own
+// explicit allowlist).
+//
+// DOC-70 - `send` now always builds a `FormData` body (the same shape
+// `requestApi.create` already uses for text+file submissions) rather than
+// a plain JSON object, since the backend route is now wired through
+// Multer unconditionally (routes/chat.routes.js) - a text-only message is
+// simply a FormData object with a `content` field and zero `attachments`
+// entries, handled identically to a JSON body would have been.
+// `attachments` is an array of 0-3 File objects (already client-validated
+// for MIME/size/count by OrganizationChat.jsx - the backend remains
+// authoritative and re-validates independently regardless).
+// DOC-72 - "@Mentions in Organization Chat". `send`'s new third parameter,
+// `mentionUserIds`, is an array of 0-10 already-validated (by the
+// composer's own suggestion dropdown - see OrganizationChat.jsx) user id
+// strings - sent as a JSON-array TEXT field (`mentionUserIds`) alongside
+// `content`/`attachments`, exactly the "robust representation" shape the
+// backend's own `parseMentionUserIdsField` expects (chat.controller.js).
+// The backend independently re-validates every id regardless of what this
+// client sends (same-organization, active, allowed role) - this client
+// never assumes its own dropdown selection is still valid by the time
+// Send is actually pressed.
 export const chatApi = {
   list: (token, params) => request(`/chat/messages${buildRequestQueryString(params)}`, { method: 'GET', token }),
-  send: (content, token) => request('/chat/messages', { method: 'POST', body: { content }, token }),
+  send: (content, attachments, mentionUserIds, token) => {
+    const formData = new FormData();
+    formData.append('content', content || '');
+    (attachments || []).forEach((file) => formData.append('attachments', file));
+    if (mentionUserIds && mentionUserIds.length > 0) {
+      formData.append('mentionUserIds', JSON.stringify(mentionUserIds));
+    }
+    return request('/chat/messages', { method: 'POST', body: formData, token });
+  },
+  // DOC-72 - same-Organization, active, allowed-chat-role user search for
+  // the composer's own @mention suggestion dropdown (GET /api/chat/
+  // mention-users?q=...). `q` is optional; omitted (or empty), the
+  // backend returns its own small "browse" list rather than an error.
+  // Returns only `{ id, fullName, role, hasProfileImage }` per result -
+  // never email/bio/organization internals (see chat.controller.js's own
+  // `sanitizeMentionCandidate`).
+  searchMentionUsers: (token, q) => request(`/chat/mention-users${buildRequestQueryString({ q })}`, { method: 'GET', token }),
 };
 
 // DOC-18 - "In-App Notifications". Reachable by manager/operator/employee
@@ -563,6 +699,130 @@ export const chatApi = {
 // the backend having no PATCH/DELETE route for it (task spec section 36).
 export const auditLogApi = {
   list: (token, params) => request(`/audit-logs${buildRequestQueryString(params)}`, { method: 'GET', token }),
+};
+
+// DOC-73 - "Private Direct Messages". Reachable by manager/operator/
+// employee only on the backend (System Admin is structurally rejected -
+// see routes/directMessage.routes.js) - a system_admin or unauthenticated
+// call simply fails (403/401), the same as every other endpoint in this
+// file. Every conversation-scoped call is authorized server-side by
+// PARTICIPATION, not merely organization membership - this client never
+// assumes a call will succeed just because the current user is in the
+// same Organization (see directMessage.controller.js's own
+// loadAuthorizedConversation for the full privacy rule).
+export const directMessageApi = {
+  // GET /api/direct-messages/users?q=... - same-organization, active,
+  // allowed-role user search for the "start a new conversation" box.
+  // Returns only `{ id, fullName, role, hasProfileImage }` per result -
+  // never email/bio/organization internals.
+  searchUsers: (token, q) => request(`/direct-messages/users${buildRequestQueryString({ q })}`, { method: 'GET', token }),
+  // `recipientId` is the only field ever sent - senderId/organizationId
+  // are always derived server-side from the token. Idempotent: calling
+  // this again for the same pair returns the SAME existing conversation
+  // (200), never a duplicate (201 the first time only).
+  createConversation: (recipientId, token) => request('/direct-messages/conversations', {
+    method: 'POST', body: { recipientId }, token,
+  }),
+  // Every conversation where the CALLER is a participant - never a
+  // global/Organization-wide list. Does not include message history (use
+  // listMessages for that).
+  listConversations: (token) => request('/direct-messages/conversations', { method: 'GET', token }),
+  // `params` is `{ before, limit }`, both optional - reuses the exact
+  // same query-string builder every other paginated call in this file
+  // already uses.
+  listMessages: (conversationId, token, params) => request(
+    `/direct-messages/conversations/${conversationId}/messages${buildRequestQueryString(params)}`,
+    { method: 'GET', token },
+  ),
+  // `attachments` is an array of 0-3 File objects (already client-
+  // validated for MIME/size/count, mirroring OrganizationChat.jsx's own
+  // DOC-70 validation) - the backend remains authoritative and
+  // re-validates independently regardless. Always builds FormData, the
+  // same shape chatApi.send already uses, so a text-only message is
+  // simply a FormData object with a `content` field and zero
+  // `attachments` entries.
+  sendMessage: (conversationId, content, attachments, token) => {
+    const formData = new FormData();
+    formData.append('content', content || '');
+    (attachments || []).forEach((file) => formData.append('attachments', file));
+    return request(`/direct-messages/conversations/${conversationId}/messages`, {
+      method: 'POST', body: formData, token,
+    });
+  },
+  // No body - sets the CALLER's own lastReadAt for this conversation to
+  // now; never affects the other participant's own read state.
+  markRead: (conversationId, token) => request(`/direct-messages/conversations/${conversationId}/read`, {
+    method: 'POST', token,
+  }),
+};
+
+// DOC-74 - "Organization Policies & Guidelines". Reachable by manager/
+// operator/employee only on the backend (System Admin is structurally
+// rejected - see routes/policy.routes.js). `list`/`get` return a
+// role-shaped response - the BACKEND decides what a caller may see
+// (Manager: any status; Employee/Operator: published+active only), this
+// client never filters/hides anything itself. `create`/`update`/`archive`/
+// `getAcknowledgements` all 403 on the backend for a non-Manager token,
+// even though this client only ever renders those controls for a Manager
+// in the first place.
+export const policyApi = {
+  list: (token, params) => request(`/policies${buildRequestQueryString(params)}`, { method: 'GET', token }),
+  get: (policyId, token) => request(`/policies/${policyId}`, { method: 'GET', token }),
+  // `payload` is always a subset of { title, content, category,
+  // isPublished } - organizationId/createdBy/updatedBy/version are always
+  // server-derived, never sent from here.
+  create: (payload, token) => request('/policies', { method: 'POST', body: payload, token }),
+  update: (policyId, payload, token) => request(`/policies/${policyId}`, { method: 'PATCH', body: payload, token }),
+  // No body - the backend sets status: 'ARCHIVED' + archivedAt entirely
+  // server-side. There is no un-archive endpoint (not requested by the
+  // ticket - see routes/policy.routes.js's own comment).
+  archive: (policyId, token) => request(`/policies/${policyId}/archive`, { method: 'PATCH', token }),
+  // No body - the backend always derives the acknowledging user from the
+  // token (never accepts a userId here). Idempotent: acknowledging the
+  // same current version twice returns the same existing record (200),
+  // never a duplicate.
+  acknowledge: (policyId, token) => request(`/policies/${policyId}/acknowledge`, { method: 'POST', token }),
+  // Manager-only - compliance summary + per-user acknowledgement status
+  // for the policy's CURRENT version, own Organization's active
+  // Employees/Operators only (see policy.controller.js's own
+  // getPolicyAcknowledgements).
+  getAcknowledgements: (policyId, token) => request(`/policies/${policyId}/acknowledgements`, { method: 'GET', token }),
+};
+
+// DOC-75 - "Organization Q&A / Knowledge Board". Reachable by manager/
+// operator/employee only on the backend (System Admin is structurally
+// rejected - see routes/knowledge.routes.js). `listQuestions` uses simple
+// PAGE-BASED pagination (`page`/`limit`), a deliberate, documented
+// deviation from chatApi/directMessageApi's own `before`-cursor shape -
+// see knowledge.controller.js's own top comment on `parsePagination` for
+// why (a sortable/filterable board vs. an append-only real-time feed).
+// `create`/`update` on a question, and `answer` create/update, all only
+// ever send the plain-text fields the backend actually accepts -
+// organizationId/authorId/status/acceptedAnswerId/answerCount/viewCount
+// are always server-derived, never sent from here.
+export const knowledgeApi = {
+  listQuestions: (token, params) => request(`/knowledge/questions${buildRequestQueryString(params)}`, { method: 'GET', token }),
+  getQuestion: (questionId, token) => request(`/knowledge/questions/${questionId}`, { method: 'GET', token }),
+  createQuestion: (payload, token) => request('/knowledge/questions', { method: 'POST', body: payload, token }),
+  // `payload` is a subset of { title, content, category } - only usable
+  // by the question's own author while it is not CLOSED (backend-
+  // enforced, this client only ever renders the Edit control under the
+  // same condition).
+  updateQuestion: (questionId, payload, token) => request(`/knowledge/questions/${questionId}`, { method: 'PATCH', body: payload, token }),
+  // No body - question author OR Manager (backend-enforced).
+  closeQuestion: (questionId, token) => request(`/knowledge/questions/${questionId}/close`, { method: 'POST', token }),
+  reopenQuestion: (questionId, token) => request(`/knowledge/questions/${questionId}/reopen`, { method: 'POST', token }),
+  listAnswers: (questionId, token, params) => request(`/knowledge/questions/${questionId}/answers${buildRequestQueryString(params)}`, { method: 'GET', token }),
+  // `content` only - authorId/organizationId/questionId are always
+  // server-derived. Rejected (409) by the backend if the question is
+  // CLOSED, regardless of what this client's own UI currently shows.
+  createAnswer: (questionId, content, token) => request(`/knowledge/questions/${questionId}/answers`, { method: 'POST', body: { content }, token }),
+  updateAnswer: (questionId, answerId, content, token) => request(`/knowledge/questions/${questionId}/answers/${answerId}`, { method: 'PATCH', body: { content }, token }),
+  // No body - question author OR Manager (backend-enforced). Idempotent:
+  // accepting the same answer twice, or unaccepting when nothing is
+  // accepted, both simply return the current state.
+  acceptAnswer: (questionId, answerId, token) => request(`/knowledge/questions/${questionId}/answers/${answerId}/accept`, { method: 'POST', token }),
+  unacceptAnswer: (questionId, token) => request(`/knowledge/questions/${questionId}/accepted-answer`, { method: 'DELETE', token }),
 };
 
 export const notificationApi = {

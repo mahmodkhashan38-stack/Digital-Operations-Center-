@@ -29,6 +29,8 @@ const {
   getOrganizationRequestStatistics,
 } = require('../controllers/request.controller');
 const { listComments, createComment } = require('../controllers/comment.controller');
+// DOC-68 - "Employee Satisfaction Rating".
+const { createRating, getMyRating, listOrganizationRatings } = require('../controllers/requestRating.controller');
 
 const router = express.Router();
 
@@ -211,6 +213,26 @@ router.get(
   requireOrganizationMembership,
   requireActiveOrganization,
   listAssignedRequests,
+);
+// DOC-68 - "Employee Satisfaction Rating". Manager-only, own Organization
+// - registered here, ahead of the blanket Employee-only gate below, for
+// the identical reason GET /organization and GET /organization/export
+// already are (an Employee token must never reach the Manager's ratings
+// list). `/ratings/organization` is a distinct, two-segment literal path
+// - it can never collide with the one-segment `/:id` pattern registered
+// further down, nor with `/:id/rating` (registered later in this file,
+// inside the blanket Employee gate) since Express matches literal path
+// segments exactly: the second segment here is "organization", the
+// second segment of `/:id/rating` is "rating" - they can never both match
+// the same incoming URL regardless of registration order.
+router.get(
+  '/ratings/organization',
+  verifyToken,
+  requirePasswordChangeCompleted,
+  requireRole('manager'),
+  requireOrganizationMembership,
+  requireActiveOrganization,
+  listOrganizationRatings,
 );
 router.patch(
   '/:id/assign',
@@ -396,5 +418,17 @@ router.patch('/:id', updateMyRequest);
 // broadened to Operator/Manager/System Admin.
 router.post('/:id/attachments', uploadAttachments, addRequestAttachments);
 router.delete('/:id/attachments/:attachmentId', removeRequestAttachment);
+// DOC-68 - "Employee Satisfaction Rating". Employee-only, sharing this
+// same blanket chain - only the Employee who created a Request may ever
+// rate it (task spec section 10), the exact role this router's blanket
+// gate already restricts to. Eligibility (own Request, status === closed,
+// not already rated) is enforced inside the controller
+// (requestRating.controller.js), never broadened to Operator/Manager/
+// System Admin. `/:id/rating` (singular) is a distinct two-segment path -
+// it can never collide with `/:id/attachments` (different literal second
+// segment) or with the pre-gate `/ratings/organization` Manager route
+// above (see that route's own comment for why).
+router.post('/:id/rating', createRating);
+router.get('/:id/rating', getMyRating);
 
 module.exports = router;

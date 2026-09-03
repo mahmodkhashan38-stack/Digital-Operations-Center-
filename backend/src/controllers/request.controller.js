@@ -27,6 +27,14 @@ const { buildCsv } = require('../utils/csvExport');
 // concurrency/format rationale. Never read/written anywhere else in this
 // controller.
 const { getNextRequestNumber } = require('../services/requestNumber.service');
+// DOC-68 - "Employee Satisfaction Rating". Only the statistics helpers are
+// needed here - the create/read rating endpoints themselves live in their
+// own dedicated controllers/requestRating.controller.js (task spec's own
+// audit question 6 decided a separate model/controller is cleaner; the
+// Manager satisfaction NUMBERS are the one thing added to this existing
+// statistics endpoint, mirroring how DOC-55's `sla` block was added here).
+const { computeSatisfactionStatistics, computeOperatorRatingBreakdown } = require('../utils/requestRatingStatistics');
+const RequestRating = require('../models/RequestRating');
 
 // DOC-10 - Create a New Request. DOC-11 - View Request Details and
 // Status (Employee's own Requests only). DOC-12 - Update Request
@@ -954,6 +962,14 @@ const CSV_HEADERS = [
   'Request Number', 'Title', 'Employee', 'Operator', 'Category', 'Priority', 'Status',
   'Created At', 'Updated At', 'SLA Due At', 'SLA Status', 'Resolved At', 'Closed At',
   'Cancellation Reason',
+  // DOC-68 - "Employee Satisfaction Rating" (task spec section 38 -
+  // implemented, not deferred: reuses csvExport.js's own RFC4180/
+  // formula-injection escaping unchanged, own Organization only, plain
+  // text only - the exact same guarantees every other column here already
+  // has). Empty string (never 'N/A') for an unrated Request, matching
+  // this file's own existing "Cancellation Reason" convention for "nothing
+  // to say" above.
+  'Satisfaction Score', 'Satisfaction Comment',
 ];
 
 // Builds one CSV row per Request, in the exact same column order as
@@ -969,7 +985,7 @@ const CSV_HEADERS = [
 // Manager" condition) - empty string (never 'N/A') for a Request that was
 // never cancelled, matching this column's own natural "nothing to say"
 // state rather than implying "unknown".
-function buildExportRow(requestDoc, category, assignedOperator, createdByUser) {
+function buildExportRow(requestDoc, category, assignedOperator, createdByUser, rating) {
   return [
     exportRequestNumberCell(requestDoc),
     requestDoc.title,
@@ -985,6 +1001,8 @@ function buildExportRow(requestDoc, category, assignedOperator, createdByUser) {
     exportDateCell(requestDoc.resolvedAt),
     exportDateCell(requestDoc.closedAt),
     requestDoc.cancelReason || '',
+    rating ? String(rating.score) : '',
+    rating && rating.comment ? rating.comment : '',
   ];
 }
 
@@ -1039,16 +1057,24 @@ const exportOrganizationRequestsCsv = async (req, res, next) => {
     // indication of what columns they would have gotten.
     const requestDocs = totalMatched === 0 ? [] : await fetchSortedRequests(query, sortBy, sortOrder);
 
-    const [{ categoryMap, operatorMap }, creatorMap] = await Promise.all([
+    const [{ categoryMap, operatorMap }, creatorMap, ratings] = await Promise.all([
       buildRequestEnrichmentMaps(requestDocs, req.user.organizationId),
       buildCreatorMap(requestDocs, req.user.organizationId),
+      // DOC-68 - one batched fetch, own Organization only, never one
+      // query per row (N+1) - the same discipline every other enrichment
+      // map on this endpoint already follows.
+      requestDocs.length > 0
+        ? RequestRating.find({ requestId: { $in: requestDocs.map((doc) => doc._id) }, organizationId: req.user.organizationId })
+        : [],
     ]);
+    const ratingMap = new Map(ratings.map((rating) => [String(rating.requestId), rating]));
 
     const rows = requestDocs.map((doc) => buildExportRow(
       doc,
       categoryMap.get(String(doc.categoryId)) || null,
       doc.assignedOperatorId ? (operatorMap.get(String(doc.assignedOperatorId)) || null) : null,
       creatorMap.get(String(doc.createdBy)) || null,
+      ratingMap.get(String(doc._id)) || null,
     ));
 
     const csvBody = buildCsv(CSV_HEADERS, rows);
@@ -3570,6 +3596,17 @@ const getOrganizationRequestStatistics = async (req, res, next) => {
       overdueCount, dueSoonCount, slaComplianceRate, averageResolutionMinutes,
     } = computeSlaStatistics(scopedDocs);
 
+    // DOC-68 - "Employee Satisfaction Rating" (task spec sections 18/19).
+    // Deliberately NOT scoped by the same `query` (date-range/other
+    // filters) as the Request statistics above - a satisfaction number is
+    // about the Organization's ratings as a whole, not about "Requests
+    // matching today's filter", and RequestRating has its own independent
+    // organizationId scope (never req.user's Request-list filters).
+    const { averageScore, totalRated, distribution, scopedRatings } = await computeSatisfactionStatistics(
+      req.user.organizationId,
+    );
+    const byOperatorRating = await computeOperatorRatingBreakdown(scopedRatings, req.user.organizationId);
+
     return res.status(200).json({
       status: 'success',
       data: {
@@ -3580,6 +3617,9 @@ const getOrganizationRequestStatistics = async (req, res, next) => {
         byOperator,
         sla: {
           overdueCount, dueSoonCount, slaComplianceRate, averageResolutionMinutes,
+        },
+        satisfaction: {
+          averageScore, totalRated, distribution, byOperator: byOperatorRating,
         },
       },
     });
