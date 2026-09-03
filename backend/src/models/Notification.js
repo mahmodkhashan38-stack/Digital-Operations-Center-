@@ -99,6 +99,74 @@ const NOTIFICATION_TYPES = [
   'REQUEST_RESOLVED',
   'REQUEST_REOPENED',
   'REQUEST_CANCELLED',
+  // DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
+  // System-generated (task spec section 38 item 5's own documented
+  // forward-compatibility case, used here for the first time): the public
+  // forgot-password endpoint has no authenticated caller, so `actorId` is
+  // always `null` for this type - never a user "notifying themselves".
+  // `requestId` is also always `null` for this type (it is a
+  // PasswordResetRequest, not a Request - a different model entirely; its
+  // id lives in `metadata.passwordResetRequestId` instead, so this
+  // Request-typed reference field is never repurposed for a different
+  // collection). Sent to every Manager in the requesting User's own
+  // Organization - see services/notification.service.js's own DOC-70 call
+  // site for the full recipient-selection rationale.
+  'PASSWORD_RESET_REQUESTED',
+  // DOC-72 - "@Mentions in Organization Chat". `requestId` is always
+  // `null` for this type (a chat message is not a Request - a different
+  // model entirely; its id lives in `metadata.chatMessageId` instead, the
+  // same "don't repurpose a Request-typed reference field for a different
+  // collection" convention `PASSWORD_RESET_REQUESTED` already established
+  // for `PasswordResetRequest`). `actorId` is always the message's
+  // sender; never the recipient (see services/notification.service.js's
+  // own createNotification, which already refuses actorId === recipientId
+  // as a defense-in-depth self-notification guard - task spec section 6).
+  'CHAT_MENTION',
+  // DOC-73 - "Private Direct Messages". `requestId` is always `null` for
+  // this type (a direct message is not a Request - a different model
+  // entirely; identifying context lives in `metadata.conversationId`/
+  // `metadata.messageId` instead, the same "don't repurpose a
+  // Request-typed reference field for a different collection" convention
+  // `PASSWORD_RESET_REQUESTED`/`CHAT_MENTION` already established).
+  // `actorId` is always the message's sender, never the recipient (task
+  // spec section 41: "Sender must never receive Notification for own
+  // message" - enforced the same two-independent-guards way CHAT_MENTION
+  // already is: the controller's own dispatch code never targets the
+  // sender, and createNotification's own actorId===recipientId guard is a
+  // second, independent backstop). `title`/`message` are always GENERIC,
+  // safe wording (task spec section 40: "Notification should not include
+  // full message text by default") - the actual private message content
+  // is never copied into this document at all.
+  'DIRECT_MESSAGE',
+  // DOC-74 - "Organization Policies & Guidelines". `requestId` is always
+  // `null` for both types (a policy is not a Request - a different model
+  // entirely; identifying context lives in `metadata.policyId` instead,
+  // the same "don't repurpose a Request-typed reference field" convention
+  // PASSWORD_RESET_REQUESTED/CHAT_MENTION/DIRECT_MESSAGE already
+  // established). `actorId` is always the publishing Manager, `title`/
+  // `message` are always fixed, generic wording (task spec: "New
+  // organization policy available." - never the policy's own title or any
+  // content). Dispatched ONLY on a genuine publish transition or a
+  // meaningful update to an already-published policy - never for a draft
+  // save, an unpublish, or an archive action (see
+  // controllers/policy.controller.js's own dispatchPolicyNotifications for
+  // the exact trigger condition).
+  'POLICY_PUBLISHED',
+  'POLICY_UPDATED',
+  // DOC-75 - "Organization Q&A / Knowledge Board". `requestId` is always
+  // `null` for both types (a question/answer is not a Request - a
+  // different model entirely; identifying context lives in
+  // `metadata.questionId`/`metadata.answerId` instead, the same "don't
+  // repurpose a Request-typed reference field" convention every other
+  // non-Request notification type already established). `actorId` is
+  // always the answer's author (KNOWLEDGE_ANSWER_ADDED) or the accepting
+  // user (KNOWLEDGE_ANSWER_ACCEPTED) - never the recipient (task spec:
+  // "Do not notify if answer author == question author" /
+  // "Do not self-notify"). `title`/`message` are always generic, never
+  // the answer's own text (task spec: "Do not include full answer
+  // text").
+  'KNOWLEDGE_ANSWER_ADDED',
+  'KNOWLEDGE_ANSWER_ACCEPTED',
 ];
 
 const notificationSchema = new mongoose.Schema(

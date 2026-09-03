@@ -89,6 +89,10 @@ function describeActivity(activity) {
       return { title: `Completion image${metadata.count === 1 ? '' : 's'} added`, detail: metadata.count ? `${metadata.count} image(s)` : null };
     case 'COMPLETION_IMAGE_REMOVED':
       return { title: 'Completion image removed', detail: metadata.originalName || null };
+    case 'SATISFACTION_SUBMITTED':
+      // DOC-68 - score only (never the full comment - it deliberately
+      // never leaves RequestRating, see that model's own comment).
+      return { title: `Employee rated the service ${metadata.score || activity.newValue}/5`, detail: null };
     default:
       // Defensive only - every activity type the backend can ever produce
       // is one of the cases above (models/RequestActivity.js's own

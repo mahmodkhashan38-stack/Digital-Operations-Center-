@@ -42,27 +42,46 @@ const mongoose = require('mongoose');
 
 const BUCKET_NAME = 'requestImages';
 
-let cachedBucket = null;
+// DOC-71 - "Enhanced User Profile: Profile Picture + Bio" (task spec
+// section 5: "If using GridFS, prefer a dedicated bucket if architecture
+// supports it cleanly"). Every function below now accepts an OPTIONAL
+// trailing `bucketName`, defaulting to the original `BUCKET_NAME`
+// ('requestImages') everywhere - every EXISTING call site
+// (request.controller.js, via services/requestImageStorage.js) is
+// therefore byte-for-byte unaffected and continues to read/write the
+// exact same bucket it always has, with zero code changes required there.
+// services/profileImageStorage.js is the one new caller that passes its
+// own distinct bucket name ('profileImages'), so a Request image and a
+// User profile image can never collide/overwrite one another even though
+// they now share this one small wrapper module - Request attachments and
+// User avatars remain two conceptually separate collections
+// (`profileImages.files`/`profileImages.chunks` vs
+// `requestImages.files`/`requestImages.chunks`), never mixed.
+const cachedBucketsByName = new Map();
 
-// Lazily creates (and caches) the GridFSBucket. Lazy on purpose: this
-// module is required at process start (via request.controller.js), well
-// before connectDB() has necessarily finished - the bucket itself is
-// only actually constructed the first time a caller performs a real
-// GridFS operation, by which point the app has always already connected
-// (every route handler runs after server.js's connectDB() -> app.listen()
-// sequence). Cached afterwards so repeated calls reuse the same bucket
-// instance rather than re-deriving it from mongoose.connection on every
-// upload/download/delete.
-function getBucket() {
-  if (cachedBucket) return cachedBucket;
+// Lazily creates (and caches, per bucket name) the GridFSBucket. Lazy on
+// purpose: this module is required at process start (via
+// request.controller.js/profileImageStorage.js), well before connectDB()
+// has necessarily finished - a bucket is only actually constructed the
+// first time a caller performs a real GridFS operation against it, by
+// which point the app has always already connected (every route handler
+// runs after server.js's connectDB() -> app.listen() sequence). Cached
+// afterwards so repeated calls for the SAME bucket name reuse the same
+// bucket instance rather than re-deriving it from mongoose.connection
+// every time.
+function getBucket(bucketName = BUCKET_NAME) {
+  if (cachedBucketsByName.has(bucketName)) {
+    return cachedBucketsByName.get(bucketName);
+  }
 
   const { db } = mongoose.connection;
   if (!db) {
     throw new Error('GridFS storage is unavailable: the Mongoose connection is not established yet.');
   }
 
-  cachedBucket = new mongoose.mongo.GridFSBucket(db, { bucketName: BUCKET_NAME });
-  return cachedBucket;
+  const bucket = new mongoose.mongo.GridFSBucket(db, { bucketName });
+  cachedBucketsByName.set(bucketName, bucket);
+  return bucket;
 }
 
 // Uploads a single in-memory buffer (Multer memoryStorage's
@@ -76,11 +95,13 @@ function getBucket() {
 // (the upload stream's 'finish' event) - a caller can safely treat a
 // resolved promise as "this file now exists in GridFS, safe to
 // reference from a Request document".
-function uploadBuffer(buffer, { filename, contentType, metadata } = {}) {
+function uploadBuffer(buffer, {
+  filename, contentType, metadata, bucketName = BUCKET_NAME,
+} = {}) {
   return new Promise((resolve, reject) => {
     let bucket;
     try {
-      bucket = getBucket();
+      bucket = getBucket(bucketName);
     } catch (error) {
       reject(error);
       return;
@@ -98,8 +119,8 @@ function uploadBuffer(buffer, { filename, contentType, metadata } = {}) {
 // responsible for authorization BEFORE calling this; this function
 // performs no access control of its own. Streams directly to the HTTP
 // response - never buffers the whole file into memory.
-function openDownloadStream(fileId) {
-  return getBucket().openDownloadStream(fileId);
+function openDownloadStream(fileId, bucketName = BUCKET_NAME) {
+  return getBucket(bucketName).openDownloadStream(fileId);
 }
 
 // Looks up a single file's own GridFS-level metadata (contentType,
@@ -108,8 +129,8 @@ function openDownloadStream(fileId) {
 // Content-Type/Content-Length before streaming, and by the migration
 // script to check "does this fileId already exist" for idempotency.
 // Returns null (never throws) when the file does not exist.
-async function findFile(fileId) {
-  const bucket = getBucket();
+async function findFile(fileId, bucketName = BUCKET_NAME) {
+  const bucket = getBucket(bucketName);
   const docs = await bucket.find({ _id: fileId }).toArray();
   return docs[0] || null;
 }
@@ -122,9 +143,9 @@ async function findFile(fileId) {
 // "missing file is fine" philosophy for the legacy local-disk path. Any
 // OTHER error (a real database error, connection failure, etc.) still
 // rejects - this is not a blanket try/catch-and-ignore.
-async function deleteFile(fileId) {
+async function deleteFile(fileId, bucketName = BUCKET_NAME) {
   try {
-    await getBucket().delete(fileId);
+    await getBucket(bucketName).delete(fileId);
   } catch (error) {
     if (error && /FileNotFound/i.test(error.message || '')) {
       return;

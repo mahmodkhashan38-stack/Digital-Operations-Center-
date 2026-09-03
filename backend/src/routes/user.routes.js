@@ -3,6 +3,7 @@ const verifyToken = require('../middleware/auth');
 const requireRole = require('../middleware/requireRole');
 const requirePasswordChangeCompleted = require('../middleware/requirePasswordChangeCompleted');
 const { requireOrganizationMembership, requireActiveOrganization } = require('../middleware/organizationScope');
+const { uploadMemory, handleUpload } = require('../middleware/upload');
 const {
   listOrganizationUsers,
   updateUserRole,
@@ -11,7 +12,15 @@ const {
   updateUserStatus,
   updateUserSpecialties,
   resetUserPassword,
+  listPasswordResetRequests,
+  approvePasswordResetRequest,
+  rejectPasswordResetRequest,
 } = require('../controllers/user.controller');
+const {
+  uploadMyProfileImage,
+  deleteMyProfileImage,
+  getUserProfileImageContent,
+} = require('../controllers/userProfileImage.controller');
 
 const router = express.Router();
 
@@ -48,6 +57,49 @@ const router = express.Router();
 // were registered first, since Express matches by registration order, not
 // specificity).
 router.patch('/me', verifyToken, requirePasswordChangeCompleted, updateMyProfile);
+
+// DOC-71 - "Enhanced User Profile: Profile Picture + Bio" - profile image
+// upload/delete. Same exact chain and same "genuinely role-agnostic,
+// self-scoped-only" reasoning as `/me` immediately above (System Admin's
+// own organizationId is always null, and it must be able to set its own
+// avatar too - task spec section 21) - deliberately NOT composed with
+// requireRole(...)/requireOrganizationMembership. There is no `:userId`
+// anywhere in either route; the target user is always derived from
+// `req.user.userId` inside the controller (task spec section 10), so
+// nothing here could ever act on another user's image regardless of what
+// a client sends.
+//
+// `uploadMemory.single('profileImage')` reuses the EXACT SAME Multer
+// instance/fileFilter/size-limit Request images already use
+// (middleware/upload.js) - no separate, looser profile-image-specific
+// validation was introduced (task spec section 30). `handleUpload` reuses
+// the same MulterError -> clean 400/413 JSON translation Request image
+// uploads already get.
+router.post(
+  '/me/profile-image',
+  verifyToken,
+  requirePasswordChangeCompleted,
+  handleUpload(uploadMemory.single('profileImage')),
+  uploadMyProfileImage,
+);
+router.delete('/me/profile-image', verifyToken, requirePasswordChangeCompleted, deleteMyProfileImage);
+
+// DOC-71 - profile image READ. Reachable by every authenticated role
+// (self-view must always work, including for a System Admin or an
+// Organization-less legacy account), so this is also registered ahead of
+// the blanket Manager-only gate below - authorization for VIEWING SOMEONE
+// ELSE's image (same non-null organizationId only) is enforced inside
+// getUserProfileImageContent itself, not via requireOrganizationMembership
+// (which would incorrectly reject a caller with organizationId === null
+// from even viewing their OWN avatar - it only exempts system_admin, not
+// every org-less case).
+//
+// `/:userId/profile-image` is a two-segment path and can never collide
+// with the one-segment `/:id` PATCH routes below regardless of
+// registration order (Express matches by exact segment count), the same
+// non-collision guarantee this router's other multi-segment routes
+// (`/password-reset-requests/:id/approve`) already rely on.
+router.get('/:userId/profile-image', verifyToken, requirePasswordChangeCompleted, getUserProfileImageContent);
 
 // DOC-35 - Organization user-role management is Manager-only. System Admin
 // deliberately does NOT get access through this router - it already has
@@ -97,5 +149,17 @@ router.patch('/:id/specialties', updateUserSpecialties);
 // user.controller.js for the complete authorization/target-protection/
 // inactive-user-policy rules.
 router.patch('/:id/reset-password', resetUserPassword);
+
+// DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
+// All three share this router's own blanket Manager/own-Organization/
+// active-Organization chain above - no additional middleware needed.
+// Three-segment paths (`/password-reset-requests/:id/approve` etc.) can
+// never collide with the one-segment `/:id` PATCH route above regardless
+// of registration order (Express matches by exact segment count), the
+// same non-collision guarantee this project's other routers already rely
+// on for analogous shapes.
+router.get('/password-reset-requests', listPasswordResetRequests);
+router.patch('/password-reset-requests/:id/approve', approvePasswordResetRequest);
+router.patch('/password-reset-requests/:id/reject', rejectPasswordResetRequest);
 
 module.exports = router;

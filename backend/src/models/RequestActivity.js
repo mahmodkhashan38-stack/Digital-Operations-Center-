@@ -51,6 +51,17 @@ const ACTIVITY_TYPES = [
   'BEFORE_IMAGE_REMOVED',
   'COMPLETION_IMAGE_ADDED',
   'COMPLETION_IMAGE_REMOVED',
+  // DOC-68 - "Employee Satisfaction Rating". Recorded once, immediately
+  // after a successful rating submission - never for a rejected/failed
+  // attempt (task spec section 45: "rejected rating creates no Timeline
+  // event"). `newValue` holds the numeric score (display-ready as-is,
+  // like PRIORITY_CHANGED/STATUS_CHANGED already do); `metadata.score` is
+  // ALSO set for clarity/redundancy at the display layer (see
+  // requestRating.controller.js). The full comment text is deliberately
+  // NEVER copied here (task spec section 26: "Do NOT duplicate the full
+  // comment into RequestActivity") - it lives exclusively in
+  // RequestRating.comment; the Timeline only ever shows the score.
+  'SATISFACTION_SUBMITTED',
 ];
 
 // `oldValue`/`newValue` deliberately hold different KINDS of value

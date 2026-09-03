@@ -122,9 +122,64 @@ const AUDIT_ACTIONS = [
   'ORGANIZATION_SETTINGS_UPDATED',
   // Self-service Profile (any role, DOC-62)
   'PROFILE_UPDATED',
+  // DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
+  // Recorded IN ADDITION TO (never instead of) the existing
+  // USER_PASSWORD_RESET entry `performPasswordReset` already writes for
+  // every password reset, self-service-requested or not - that entry
+  // documents "a password was reset"; these two document "a specific
+  // pending PasswordResetRequest was reviewed" (which request, resolved
+  // when, by which Manager) - a genuinely different fact, not a duplicate
+  // (task spec section 16: "Do not duplicate meaningless entries" - this
+  // is not meaningless, it is the only record that a self-reported
+  // request was ever formally closed out). Creating the PasswordResetRequest
+  // itself is NOT audit-logged - it is a public, pre-authentication action
+  // with no actor to attribute it to, and the PasswordResetRequest
+  // document itself is already the durable, timestamped record of that
+  // event (see that model's own top comment).
+  'PASSWORD_RESET_REQUEST_APPROVED',
+  'PASSWORD_RESET_REQUEST_REJECTED',
+  // DOC-69 - "Login History & Active Sessions" (task spec section 26).
+  // Deliberately NOT one entry per ordinary self-service session action
+  // (login, logout, "log out this session", "log out others") - those are
+  // normal, everyday, self-directed activity, fully visible to the acting
+  // user themselves via GET /api/auth/sessions (their own Login
+  // History/Active Sessions), and are recorded there, not here (task spec:
+  // "Self-service logout/session revoke may be kept in Session history
+  // rather than Audit Log" - see backend/README.md's DOC-69 section for
+  // the full "why" of this split). These two entries exist only for the
+  // two SECURITY-SENSITIVE, OTHER-DIRECTED cases where one person's action
+  // forcibly ends ANOTHER user's sessions - a fact the Audit Log's
+  // existing "who did an administrative/security-relevant thing to whom"
+  // purpose already exists to capture (see this file's own top comment).
+  'SESSIONS_REVOKED_AFTER_PASSWORD_RESET',
+  'USER_SESSIONS_REVOKED_ON_DEACTIVATION',
+  // DOC-74 - "Organization Policies & Guidelines" (task spec: "Add actions:
+  // POLICY_CREATED, POLICY_UPDATED, POLICY_PUBLISHED, POLICY_UNPUBLISHED,
+  // POLICY_ARCHIVED... with safe metadata (policyId, title, version,
+  // changedFields) - never full policy content"). Normal acknowledgement
+  // is deliberately NOT one of these (task spec: "do not audit-log every
+  // acknowledgement" - already durably recorded in PolicyAcknowledgement
+  // itself, see that model's own top comment).
+  'POLICY_CREATED',
+  'POLICY_UPDATED',
+  'POLICY_PUBLISHED',
+  'POLICY_UNPUBLISHED',
+  'POLICY_ARCHIVED',
+  // DOC-75 - "Organization Q&A / Knowledge Board" (task spec section 34:
+  // "Normal Q&A activity is NOT administrative. Do NOT Audit Log question
+  // creation, answer creation, accepted answer... If Manager closes
+  // someone else's question: optional controlled Audit event could be
+  // justified. Default: no noisy Audit Log."). DECISION (documented):
+  // this ONE action is the only Q&A event that is Audit-Logged - a
+  // Manager exercising a moderation privilege over content they do not
+  // own. Recorded ONLY when a Manager closes a question authored by a
+  // DIFFERENT user (see knowledge.controller.js's own `closeQuestion`) -
+  // a Manager closing their OWN question is ordinary, non-administrative
+  // activity and is never logged.
+  'KNOWLEDGE_QUESTION_CLOSED_BY_MANAGER',
 ];
 
-const TARGET_TYPES = ['Organization', 'User', 'ServiceCategory'];
+const TARGET_TYPES = ['Organization', 'User', 'ServiceCategory', 'OrganizationPolicy', 'KnowledgeQuestion'];
 
 const auditLogSchema = new mongoose.Schema(
   {

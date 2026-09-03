@@ -1,5 +1,58 @@
 const mongoose = require('mongoose');
 
+// DOC-71 - "Enhanced User Profile: Profile Picture + Bio". One current
+// profile image per user, stored as a small METADATA/REFERENCE
+// subdocument only - the actual bytes always live in the image-storage
+// abstraction (services/profileImageStorage.js), never as Base64 or any
+// other binary form inside this User document (task spec's own standing
+// constraint). Mirrors models/Request.js's own `attachmentSchema` shape
+// (`objectKey` for S3 / `fileId` for GridFS - whichever is populated IS
+// the current provider, never a separate redundant "provider" string that
+// could drift out of sync) - deliberately NOT a shared/imported schema,
+// since a Request attachment also carries Request-specific fields
+// (`uploadedAt`, `url`, Request-shaped `size`/`mimeType` enums) that have
+// no meaning for a profile image; this is its own small, independent
+// schema for its own independent concept (task spec's own instruction to
+// audit before blindly reusing Request image metadata - see
+// services/profileImageStorage.js's own header comment for the full
+// writeup of that audit).
+//
+// `_id: false` - this is a single embedded value object, never a list of
+// subdocuments that would need their own individual ids (unlike
+// `attachments`/`completionAttachments`, which are arrays). `null` as a
+// WHOLE VALUE (not merely empty fields) is what "this user currently has
+// no profile image" looks like - the default state for every existing
+// account, requiring no migration.
+const profileImageSchema = new mongoose.Schema(
+  {
+    objectKey: { type: String, trim: true, default: null },
+    fileId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    mimeType: { type: String, default: null },
+    size: { type: Number, default: null },
+  },
+  {
+    _id: false,
+    // Only `updatedAt` - this is exactly "when was the current image set",
+    // which doubles as the cache-busting version this ticket asks for
+    // (task spec section 28) with no extra field needed; there is no
+    // separate "createdAt" concept distinct from that for a value that is
+    // replaced wholesale, never edited in place.
+    timestamps: { createdAt: false, updatedAt: true },
+  },
+);
+
+// Defense in depth, mirrors Request.js's own `ensureStorageReference` -
+// a SAVED profile image subdocument must reference either GridFS or S3,
+// never neither (a data-integrity guard, not a normal user-facing error
+// path - the controller never constructs one without a reference).
+function ensureProfileImageStorageReference(next) {
+  if (!this.fileId && !this.objectKey) {
+    this.invalidate('objectKey', 'A profile image must reference a GridFS fileId or an S3 objectKey.');
+  }
+  next();
+}
+profileImageSchema.pre('validate', ensureProfileImageStorageReference);
+
 // Represents an application user account.
 const userSchema = new mongoose.Schema({
   fullName: {
@@ -170,6 +223,29 @@ const userSchema = new mongoose.Schema({
   mustChangePassword: {
     type: Boolean,
     default: false,
+  },
+  // DOC-71 - "Enhanced User Profile". Optional, plain text only, trimmed,
+  // max 250 characters (utils/userFieldValidation.js's own `validateBio`
+  // is the real, authoritative enforcement - this schema-level `maxlength`
+  // is defense in depth, not the primary guard). `default: null` - every
+  // existing account before this ticket simply has no bio yet, applied by
+  // Mongoose the first time each such document loads, the same
+  // no-migration-required pattern `specialties`/`mustChangePassword`
+  // already established. Every role (including System Admin - task spec
+  // section 21) may set their own bio; nothing here is role-conditional.
+  bio: {
+    type: String,
+    trim: true,
+    default: null,
+    maxlength: [250, 'Bio must be at most 250 characters.'],
+  },
+  // DOC-71 - see profileImageSchema's own top comment for the full design
+  // rationale. `null` (the whole value, not merely empty fields) means
+  // "no profile image currently set" - the default state for every
+  // existing account, requiring no migration.
+  profileImage: {
+    type: profileImageSchema,
+    default: null,
   },
 });
 

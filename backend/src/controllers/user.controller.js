@@ -3,6 +3,8 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const ServiceCategory = require('../models/ServiceCategory');
 const Request = require('../models/Request');
+// DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
+const PasswordResetRequest = require('../models/PasswordResetRequest');
 const {
   sanitizeUser, EMAIL_REGEX, SALT_ROUNDS, validatePassword,
 } = require('./auth.controller');
@@ -13,6 +15,10 @@ const {
 // see services/auditLog.service.js's own top comment for the full
 // failure-strategy/sanitization contract this relies on.
 const { recordAuditLog } = require('../services/auditLog.service');
+// DOC-69 - "Login History & Active Sessions".
+const { revokeAllSessionsForUser } = require('../services/userSession.service');
+// DOC-71 - "Enhanced User Profile: Profile Picture + Bio".
+const { validateBio } = require('../utils/userFieldValidation');
 
 // DOC-35 - Manage Organization User Roles. DOC-48 - Organization Employee
 // Removal.
@@ -403,16 +409,39 @@ const updateMyProfile = async (req, res, next) => {
       });
     }
 
-    if (!Object.prototype.hasOwnProperty.call(body, 'fullName')) {
+    // DOC-71 - "Enhanced User Profile" extends this endpoint's own
+    // allowlist from exactly one field (`fullName`) to two
+    // (`fullName`/`bio`) - both remain optional per-request now (task
+    // spec section 11/32: "fullName-only update still works" / "bio
+    // update works" / "fullName + bio update works"), but at least one
+    // must be present, the same "reject clearly, never a silent no-op"
+    // shape this endpoint already used when `fullName` alone was
+    // mandatory.
+    const hasFullName = Object.prototype.hasOwnProperty.call(body, 'fullName');
+    const hasBio = Object.prototype.hasOwnProperty.call(body, 'bio');
+    if (!hasFullName && !hasBio) {
       return res.status(400).json({
         status: 'error',
-        message: 'No valid fields to update. Allowed fields: fullName.',
+        message: 'No valid fields to update. Allowed fields: fullName, bio.',
       });
     }
 
-    const fullNameError = validateSelfFullName(body.fullName);
-    if (fullNameError) {
-      return res.status(400).json({ status: 'error', message: fullNameError });
+    let normalizedFullName;
+    if (hasFullName) {
+      const fullNameError = validateSelfFullName(body.fullName);
+      if (fullNameError) {
+        return res.status(400).json({ status: 'error', message: fullNameError });
+      }
+      normalizedFullName = body.fullName.trim();
+    }
+
+    let normalizedBio;
+    if (hasBio) {
+      const { error: bioError, value: bioValue } = validateBio(body.bio);
+      if (bioError) {
+        return res.status(400).json({ status: 'error', message: bioError });
+      }
+      normalizedBio = bioValue;
     }
 
     // A fresh, per-request read of the caller's OWN document, by `_id`
@@ -430,12 +459,18 @@ const updateMyProfile = async (req, res, next) => {
       return res.status(404).json({ status: 'error', message: 'User not found.' });
     }
 
-    // Only ever this ONE field is ever assigned - no
-    // `Object.assign(user, body)`, no spread of the request body, nothing
-    // that could pick up a field this function has not explicitly decided
-    // to allow.
+    // Only ever these TWO explicit fields are ever assigned, and only the
+    // ones actually present in this request - no `Object.assign(user,
+    // body)`, no spread of the request body, nothing that could pick up a
+    // field this function has not explicitly decided to allow.
     const previousFullName = user.fullName;
-    user.fullName = body.fullName.trim();
+    const previousBio = user.bio;
+    if (hasFullName) {
+      user.fullName = normalizedFullName;
+    }
+    if (hasBio) {
+      user.bio = normalizedBio;
+    }
     await user.save();
 
     // DOC-64 - "Audit Log" (task spec section 23: "Decide whether
@@ -451,6 +486,13 @@ const updateMyProfile = async (req, res, next) => {
     // platform-level, task spec section 4). No Notification is created for
     // this (task spec section 23: "Do not create Notification" - this
     // endpoint never did and still does not).
+    //
+    // DOC-71 (task spec section 24) - a BIO-ONLY change creates NO audit
+    // entry at all (task spec: "do NOT create noisy audit entries for
+    // normal... Bio changes") - only recorded here as `bioChanged: true`
+    // metadata riding along on an ALREADY-logged fullName change, never as
+    // its own standalone trigger, and never the bio TEXT itself (task
+    // spec: "Do not store Bio text... unnecessarily in Audit Log").
     if (previousFullName !== user.fullName) {
       recordAuditLog({
         actorId: req.user.userId,
@@ -459,7 +501,10 @@ const updateMyProfile = async (req, res, next) => {
         targetType: 'User',
         targetId: user._id,
         changes: { fullName: { from: previousFullName, to: user.fullName } },
-        metadata: { targetUserName: user.fullName },
+        metadata: {
+          targetUserName: user.fullName,
+          ...(previousBio !== user.bio ? { bioChanged: true } : {}),
+        },
       });
     }
 
@@ -681,6 +726,37 @@ const updateUserStatus = async (req, res, next) => {
       });
     }
 
+    // DOC-69 - "Login History & Active Sessions" (task spec section 20).
+    // Only on a GENUINE deactivation (previousIsActive !== new value, the
+    // same "did this actually change" guard the audit log entry above
+    // already uses - never on an idempotent re-deactivation of an
+    // already-inactive account, which would just be reporting a
+    // `revokedCount` of stale zeros as if something new had happened).
+    // middleware/auth.js's own `isActive` check already rejects this
+    // user's very next request regardless - this additionally keeps
+    // UserSession's own state consistent with reality (task spec: "keeps
+    // state consistent") and gives the user an honest, revoked-not-merely-
+    // expired entry in their own Login History once reactivated. Never
+    // runs on REACTIVATION (`targetUser.isActive === true`) - task spec
+    // section 20: "Reactivation must NOT automatically restore old revoked
+    // sessions" - reactivating only flips `isActive` back; sessions
+    // revoked at deactivation time stay revoked, and the user simply logs
+    // in again to get a fresh one.
+    if (previousIsActive !== targetUser.isActive && targetUser.isActive === false) {
+      const revokedCount = await revokeAllSessionsForUser(targetUser._id, 'USER_DEACTIVATED');
+      if (revokedCount > 0) {
+        recordAuditLog({
+          actorId: req.user.userId,
+          organizationId: req.user.organizationId,
+          action: 'USER_SESSIONS_REVOKED_ON_DEACTIVATION',
+          targetType: 'User',
+          targetId: targetUser._id,
+          changes: null,
+          metadata: { targetUserName: targetUser.fullName, revokedCount },
+        });
+      }
+    }
+
     return respondWithUser(req, res, 200, targetUser, warning ? { warning } : undefined);
   } catch (error) {
     if (error.name === 'ValidationError') {
@@ -842,6 +918,122 @@ const updateUserSpecialties = async (req, res, next) => {
 // be forced through the change-password flow at their very next login,
 // exactly like an active target would be immediately. Reset never
 // auto-reactivates the account - `isActive` is never touched here.
+// DOC-70 - shared core of "a Manager sets a new password for a target
+// User" - extracted from resetUserPassword's own original body UNCHANGED
+// (byte-for-byte identical validation/hashing/audit-log sequence) so the
+// new "approve a PasswordResetRequest" flow can reuse this EXACT mechanism
+// (task spec section 12/15: "Do NOT implement a second unrelated reset
+// engine") instead of duplicating it. Returns `{ error }` on any validation
+// failure (caller sends the response), or `{}` on success (targetUser has
+// already been mutated AND saved, and the audit log entry already
+// recorded) - it never sends an HTTP response itself, since the two
+// callers need different response shapes afterward (resetUserPassword
+// responds with just the user; the approval endpoint also updates and
+// returns the PasswordResetRequest).
+async function performPasswordReset({ req, targetUser, newPassword, confirmPassword }) {
+  if (typeof newPassword !== 'string' || newPassword.length === 0) {
+    return { error: { status: 400, message: 'newPassword is required.' } };
+  }
+  if (typeof confirmPassword !== 'string' || confirmPassword.length === 0) {
+    return { error: { status: 400, message: 'confirmPassword is required.' } };
+  }
+  if (newPassword !== confirmPassword) {
+    return { error: { status: 400, message: 'newPassword and confirmPassword do not match.' } };
+  }
+
+  const passwordFormatError = validatePassword(newPassword);
+  if (passwordFormatError) {
+    return { error: { status: 400, message: passwordFormatError } };
+  }
+
+  // The Manager never sees, chooses a hint for, or otherwise learns the
+  // OLD password - this never reads or compares against it at all (unlike
+  // self-change, there is no "current password" concept here, by design -
+  // the whole point of a Manager reset is that the Manager does not need
+  // to know it).
+  targetUser.passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  // Forces the target through the change-password flow at their very next
+  // successful login/request - the one and only place this ever sets this
+  // field, always to `true`, never client-controlled.
+  targetUser.mustChangePassword = true;
+  await targetUser.save();
+
+  // DOC-64 - "Audit Log" (task spec sections 7/19 - CRITICAL). `changes` is
+  // deliberately `null` here, not `{ password: {...} }` - there is no safe
+  // "from/to" value for a password. `metadata` is limited to a safe
+  // identity only (`targetUserId`/`targetUserName`) - NEVER the new
+  // password, NEVER passwordHash, NEVER anything password-shaped. This is
+  // the one call site in this project where getting sanitization wrong
+  // would be most damaging, so it is kept maximally simple and explicit
+  // rather than building `metadata` from any larger object. Recorded
+  // identically regardless of WHICH caller (direct reset, or a
+  // DOC-70-approved request) invoked this - `USER_PASSWORD_RESET` always
+  // means exactly one thing: this User's password was changed by their
+  // Manager, not chosen by themselves.
+  recordAuditLog({
+    actorId: req.user.userId,
+    organizationId: req.user.organizationId,
+    action: 'USER_PASSWORD_RESET',
+    targetType: 'User',
+    targetId: targetUser._id,
+    changes: null,
+    metadata: { targetUserId: targetUser._id, targetUserName: targetUser.fullName },
+  });
+
+  // DOC-69 - "Login History & Active Sessions" (task spec section 19 -
+  // "important security requirement"). ALL of the target's active sessions
+  // are revoked - unlike self-service password change (which excludes the
+  // caller's own current session), there is no "current session" to spare
+  // here: the ACTOR is the Manager performing this reset, not the target
+  // user, so every one of the target's own logins is potentially
+  // compromised and none of them gets a pass. Runs identically regardless
+  // of WHICH caller invoked this shared function (a direct Manager reset,
+  // or a DOC-70-approved PasswordResetRequest) - both mean exactly the
+  // same thing from the target's point of view: "your password was reset
+  // without you initiating it from an already-trusted session." The target
+  // will log in fresh with the new credentials and immediately hit the
+  // existing `mustChangePassword` gate, completely unchanged.
+  const revokedCount = await revokeAllSessionsForUser(targetUser._id, 'PASSWORD_RESET');
+  if (revokedCount > 0) {
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: req.user.organizationId,
+      action: 'SESSIONS_REVOKED_AFTER_PASSWORD_RESET',
+      targetType: 'User',
+      targetId: targetUser._id,
+      changes: null,
+      metadata: { targetUserId: targetUser._id, targetUserName: targetUser.fullName, revokedCount },
+    });
+  }
+
+  return {};
+}
+
+// PATCH /api/users/:id/reset-password (manager only)
+//
+// DOC-57 - Flow B, "Manager Password Reset". Reuses resolveManageableTarget
+// (above) exactly as-is - the SAME self/system_admin/manager/cross-org
+// protections updateUserProfile/updateUserStatus/updateUserSpecialties
+// already established (task spec's own recommended target lookup shape:
+// `User.findOne({ _id, organizationId: req.user.organizationId })`) - a
+// Manager can never reset their own password through this endpoint,
+// another Manager's, System Admin's, or a User in a different
+// Organization's, and a malformed/nonexistent/cross-org id all collapse
+// into the exact same 404 (DOC-38 anti-enumeration convention).
+//
+// Only reads newPassword/confirmPassword from the body - nothing else
+// (role/organizationId/isActive/mustChangePassword injection all have
+// structurally zero effect, task spec).
+//
+// DOC-57's documented inactive-user policy (see backend/README.md): a
+// Manager MAY reset an inactive Employee/Operator's password - unlike
+// every other resolveManageableTarget-based action in this file, there is
+// deliberately NO `if (!targetUser.isActive) return 403` guard here. The
+// target still cannot log in until reactivated (middleware/auth.js's
+// isActive check is independent of this), and once reactivated they will
+// be forced through the change-password flow at their very next login,
+// exactly like an active target would be immediately. Reset never
+// auto-reactivates the account - `isActive` is never touched here.
 const resetUserPassword = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -855,53 +1047,12 @@ const resetUserPassword = async (req, res, next) => {
     }
 
     const body = req.body || {};
-    const { newPassword, confirmPassword } = body;
-
-    if (typeof newPassword !== 'string' || newPassword.length === 0) {
-      return res.status(400).json({ status: 'error', message: 'newPassword is required.' });
-    }
-    if (typeof confirmPassword !== 'string' || confirmPassword.length === 0) {
-      return res.status(400).json({ status: 'error', message: 'confirmPassword is required.' });
-    }
-    if (newPassword !== confirmPassword) {
-      return res.status(400).json({ status: 'error', message: 'newPassword and confirmPassword do not match.' });
-    }
-
-    const passwordFormatError = validatePassword(newPassword);
-    if (passwordFormatError) {
-      return res.status(400).json({ status: 'error', message: passwordFormatError });
-    }
-
-    // The Manager never sees, chooses a hint for, or otherwise learns the
-    // OLD password - this endpoint never reads or compares against it at
-    // all (unlike self-change, there is no "current password" concept
-    // here, by design - the whole point of a Manager reset is that the
-    // Manager does not need to know it).
-    targetUser.passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
-    // Forces the target through the change-password flow at their very
-    // next successful login/request - the one and only place this
-    // endpoint ever sets this field, always to `true`, never client-
-    // controlled.
-    targetUser.mustChangePassword = true;
-    await targetUser.save();
-
-    // DOC-64 - "Audit Log" (task spec sections 7/19 - CRITICAL). `changes`
-    // is deliberately `null` here, not `{ password: {...} }` - there is no
-    // safe "from/to" value for a password. `metadata` is limited to a safe
-    // identity only (`targetUserId`/`targetUserName`) - NEVER the new
-    // password, NEVER passwordHash, NEVER anything password-shaped. This
-    // is the one call site in this project where getting sanitization
-    // wrong would be most damaging, so it is kept maximally simple and
-    // explicit rather than building `metadata` from any larger object.
-    recordAuditLog({
-      actorId: req.user.userId,
-      organizationId: req.user.organizationId,
-      action: 'USER_PASSWORD_RESET',
-      targetType: 'User',
-      targetId: targetUser._id,
-      changes: null,
-      metadata: { targetUserId: targetUser._id, targetUserName: targetUser.fullName },
+    const { error: resetError } = await performPasswordReset({
+      req, targetUser, newPassword: body.newPassword, confirmPassword: body.confirmPassword,
     });
+    if (resetError) {
+      return res.status(resetError.status).json({ status: 'error', message: resetError.message });
+    }
 
     // respondWithUser already reuses sanitizeUserWithSpecialties ->
     // sanitizeUser, which never includes passwordHash/the new password/a
@@ -917,6 +1068,277 @@ const resetUserPassword = async (req, res, next) => {
   }
 };
 
+// DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
+// -----------------------------------------------------------------
+// Three Manager-only endpoints on top of the PasswordResetRequest model:
+// list (review queue), approve (reuses performPasswordReset above -
+// task spec section 12), and reject (no password change). All three share
+// this router's existing blanket
+// verifyToken/requirePasswordChangeCompleted/requireRole('manager')/
+// requireOrganizationMembership/requireActiveOrganization chain (see
+// routes/user.routes.js) - no new middleware composition is introduced.
+
+// Batch-resolves every distinct target userId in a page of requests into
+// ONE additional query (never one query per row - N+1), the same shape
+// comment.controller.js/chat.controller.js/auditLog.controller.js already
+// establish. Deliberately NOT scoped by isActive - a historical request
+// from a User later deactivated must still display their real name/role
+// (mirrors every other historical-actor-resolution helper in this
+// project). Scoped by organizationId as defense in depth even though
+// every PasswordResetRequest already carries its own trustworthy
+// organizationId.
+async function buildRequestUserMap(requests, organizationId) {
+  const userIds = Array.from(new Set(requests.map((request) => String(request.userId))));
+  if (userIds.length === 0) {
+    return new Map();
+  }
+  const users = await User.find({ _id: { $in: userIds }, organizationId });
+  return new Map(users.map((user) => [String(user._id), user]));
+}
+
+// Safe response shape (task spec section 10: "user id, fullName, email,
+// role, requestedAt, status" - never password data of any kind, and never
+// the raw Mongoose document). `reviewedBy` is resolved to a plain
+// `{id, fullName}` when present, mirroring every other actor-display
+// pattern in this project (auditLog.controller.js's sanitizeActor) -
+// never a raw User document.
+function sanitizePasswordResetRequest(request, user, reviewerMap) {
+  const reviewer = request.reviewedBy ? reviewerMap.get(String(request.reviewedBy)) : null;
+  return {
+    id: request._id,
+    user: user
+      ? {
+        id: user._id, fullName: user.fullName, email: user.email, role: user.role, isActive: user.isActive,
+      }
+      : { id: request.userId, fullName: 'Unknown user', email: request.requestedEmail, role: null, isActive: null },
+    status: request.status,
+    requestedAt: request.requestedAt,
+    reviewedAt: request.reviewedAt,
+    reviewedBy: reviewer ? { id: reviewer._id, fullName: reviewer.fullName } : null,
+  };
+}
+
+// GET /api/users/password-reset-requests?status=<pending|approved|rejected|cancelled>
+// (manager only, own Organization only - task spec section 10)
+//
+// No `status` filter returns every request for this Organization
+// (newest-first) - a Manager reviewing the queue typically wants pending
+// requests front and center, but also needs to see what was already
+// approved/rejected (task spec section 20 implies a review history, not
+// just a disappearing queue). Task spec's own explicit filter values are
+// validated the same way every other enum query parameter in this project
+// is (DOC-54's own convention) - an unrecognized value is rejected with a
+// clear 400, never silently ignored.
+const listPasswordResetRequests = async (req, res, next) => {
+  try {
+    const query = { organizationId: req.user.organizationId };
+
+    if (req.query.status !== undefined && req.query.status !== '') {
+      if (!PasswordResetRequest.STATUS_VALUES.includes(req.query.status)) {
+        return res.status(400).json({
+          status: 'error',
+          message: `status must be one of: ${PasswordResetRequest.STATUS_VALUES.join(', ')}.`,
+        });
+      }
+      query.status = req.query.status;
+    }
+
+    const requests = await PasswordResetRequest.find(query).sort({ requestedAt: -1 }).limit(200);
+
+    const userMap = await buildRequestUserMap(requests, req.user.organizationId);
+    const reviewerIds = Array.from(
+      new Set(requests.filter((request) => request.reviewedBy).map((request) => String(request.reviewedBy))),
+    );
+    const reviewers = reviewerIds.length > 0 ? await User.find({ _id: { $in: reviewerIds } }) : [];
+    const reviewerMap = new Map(reviewers.map((reviewer) => [String(reviewer._id), reviewer]));
+
+    const data = requests.map((request) => sanitizePasswordResetRequest(
+      request,
+      userMap.get(String(request.userId)),
+      reviewerMap,
+    ));
+
+    return res.status(200).json({ status: 'success', data });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+// Shared scoped-lookup for approve/reject below - identical anti-
+// enumeration shape every other id-based lookup in this project uses
+// (DOC-38): a malformed id, a nonexistent request, one belonging to
+// another Organization, and one that already left the 'pending' state all
+// collapse into responses that never distinguish "which of these
+// happened" beyond what the Manager already legitimately knows from their
+// own request list. Returns `{ passwordResetRequest }` on success, or
+// `{ error }` otherwise.
+async function loadPendingRequestForReview(req, id) {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return { error: { status: 400, message: 'Invalid password reset request id.' } };
+  }
+
+  const passwordResetRequest = await PasswordResetRequest.findOne({
+    _id: id,
+    organizationId: req.user.organizationId,
+  });
+
+  if (!passwordResetRequest) {
+    return { error: { status: 404, message: 'Password reset request not found.' } };
+  }
+
+  // Task spec section 22 - "request replay after already
+  // approved/rejected" must be impossible. Distinguishing "already
+  // reviewed" here is safe (not an enumeration risk): the Manager can
+  // only ever reach this state by already having seen this exact request
+  // in their own Organization's list.
+  if (passwordResetRequest.status !== 'pending') {
+    return {
+      error: {
+        status: 409,
+        message: `This request has already been ${passwordResetRequest.status} and cannot be reviewed again.`,
+      },
+    };
+  }
+
+  return { passwordResetRequest };
+}
+
+// PATCH /api/users/password-reset-requests/:id/approve (manager only)
+//
+// Requirements (task spec section 15): Manager only, own Organization
+// only, pending only, validate target user, perform secure reset, set
+// request approved/reviewedAt/reviewedBy, set mustChangePassword=true.
+// The actual password reset is performed by `performPasswordReset` -
+// EXACTLY the same function `resetUserPassword` (Flow B) already uses,
+// never a second implementation (task spec section 12). Reusing
+// `resolveManageableTarget` for the target-user lookup means this
+// endpoint automatically inherits every one of that helper's existing
+// protections (self/system_admin/manager targets rejected, cross-org
+// rejected) with zero new code - this is also WHY a Manager account can
+// never be approved through this flow (see auth.controller.js's
+// `forgotPassword` header comment for the full explanation of that
+// decision).
+const approvePasswordResetRequest = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { passwordResetRequest, error } = await loadPendingRequestForReview(req, id);
+    if (error) {
+      return res.status(error.status).json({ status: 'error', message: error.message });
+    }
+
+    // Deliberately NOT `resolveManageableTarget(req, req.user.userId, ...)`
+    // style self-check against the CALLING Manager - it is checked against
+    // the REQUEST's own `userId`, which can never equal the reviewing
+    // Manager's own id in practice (a Manager account could never have
+    // created this request in the first place - see the header comment
+    // above), but reusing the exact same helper unmodified is what
+    // guarantees that invariant rather than assuming it.
+    const { user: targetUser, error: targetError } = await resolveManageableTarget(
+      req,
+      String(passwordResetRequest.userId),
+      'You cannot approve your own password reset request through this endpoint.',
+    );
+    if (targetError) {
+      return res.status(targetError.status).json({ status: 'error', message: targetError.message });
+    }
+
+    const body = req.body || {};
+    const { error: resetError } = await performPasswordReset({
+      req, targetUser, newPassword: body.newPassword, confirmPassword: body.confirmPassword,
+    });
+    if (resetError) {
+      return res.status(resetError.status).json({ status: 'error', message: resetError.message });
+    }
+
+    passwordResetRequest.status = 'approved';
+    passwordResetRequest.reviewedAt = new Date();
+    passwordResetRequest.reviewedBy = req.user.userId;
+    await passwordResetRequest.save();
+
+    // DOC-64 - "Audit Log" - a SECOND, distinct entry from the
+    // USER_PASSWORD_RESET one `performPasswordReset` already recorded
+    // above (see models/AuditLog.js's own comment on why this is not a
+    // duplicate). Never includes any password-shaped value.
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: req.user.organizationId,
+      action: 'PASSWORD_RESET_REQUEST_APPROVED',
+      targetType: 'User',
+      targetId: targetUser._id,
+      changes: null,
+      metadata: {
+        targetUserId: targetUser._id,
+        targetUserName: targetUser.fullName,
+        passwordResetRequestId: passwordResetRequest._id,
+      },
+    });
+
+    // req.user (middleware/auth.js's verifyToken) deliberately does not
+    // carry fullName - resolved with one direct lookup by _id, exactly
+    // like chat.controller.js/comment.controller.js already do for the
+    // identical reason (exactly one reviewer to resolve for this
+    // response, not a batched N+1-prone lookup).
+    const reviewer = await User.findById(req.user.userId);
+    return res.status(200).json({
+      status: 'success',
+      data: sanitizePasswordResetRequest(passwordResetRequest, targetUser, new Map([[String(req.user.userId), reviewer]])),
+    });
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ status: 'error', message: error.message });
+    }
+    return next(error);
+  }
+};
+
+// PATCH /api/users/password-reset-requests/:id/reject (manager only)
+//
+// Requirements (task spec section 14): Manager only, own Organization
+// only, pending only, set rejected/reviewedAt/reviewedBy. No password
+// change occurs - this endpoint never touches passwordHash/
+// mustChangePassword/anything on the User document at all.
+const rejectPasswordResetRequest = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { passwordResetRequest, error } = await loadPendingRequestForReview(req, id);
+    if (error) {
+      return res.status(error.status).json({ status: 'error', message: error.message });
+    }
+
+    passwordResetRequest.status = 'rejected';
+    passwordResetRequest.reviewedAt = new Date();
+    passwordResetRequest.reviewedBy = req.user.userId;
+    await passwordResetRequest.save();
+
+    recordAuditLog({
+      actorId: req.user.userId,
+      organizationId: req.user.organizationId,
+      action: 'PASSWORD_RESET_REQUEST_REJECTED',
+      targetType: 'User',
+      targetId: passwordResetRequest.userId,
+      changes: null,
+      metadata: {
+        targetUserId: passwordResetRequest.userId,
+        requestedEmail: passwordResetRequest.requestedEmail,
+        passwordResetRequestId: passwordResetRequest._id,
+      },
+    });
+
+    const userMap = await buildRequestUserMap([passwordResetRequest], req.user.organizationId);
+    const reviewer = await User.findById(req.user.userId);
+    return res.status(200).json({
+      status: 'success',
+      data: sanitizePasswordResetRequest(
+        passwordResetRequest,
+        userMap.get(String(passwordResetRequest.userId)),
+        new Map([[String(req.user.userId), reviewer]]),
+      ),
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   listOrganizationUsers,
   updateUserRole,
@@ -925,6 +1347,9 @@ module.exports = {
   updateUserStatus,
   updateUserSpecialties,
   resetUserPassword,
+  listPasswordResetRequests,
+  approvePasswordResetRequest,
+  rejectPasswordResetRequest,
   ALLOWED_ROLE_TRANSITIONS,
   REQUESTABLE_ROLES,
 };

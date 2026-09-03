@@ -4931,3 +4931,2097 @@ live test it wasn't.
 `process.env`, never logged, never returned in any API response).
 `backend/.env` is confirmed gitignored and was not modified, read into
 this report, or printed anywhere during this audit.
+
+## DOC-70 - Forgot Password / Password Recovery via Manager Approval
+
+**No email delivery.** This feature has no SMTP, no third-party email
+provider, and no public password-reset link of any kind - a standing,
+explicit constraint. Recovery is instead routed through the requesting
+User's own Organization Manager, the same trusted-approval-point pattern
+DOC-57's "Manager Reset Password" already established for this project.
+
+**Flow.** `POST /api/auth/forgot-password` (public, no token) accepts only
+`{ email, companyCode }`. On success it creates a `PasswordResetRequest`
+document (`models/PasswordResetRequest.js`) - it never itself touches a
+password. A Manager then reviews the request on their Dashboard
+("Password Reset Requests" panel) and either approves it (choosing a new
+password for the user, exactly like the existing Manager Reset Password
+flow) or rejects it. Approving a request calls the SAME
+`performPasswordReset` function the existing `PATCH /api/users/:id/reset-
+password` endpoint already used - there is only ever one password-reset
+mechanism in this codebase, never a second, parallel one.
+
+**`mustChangePassword` integration.** Unchanged. An approved request sets
+`mustChangePassword = true` on the target User exactly the way a direct
+Manager reset already did - the user is forced through the existing
+`PATCH /api/auth/change-password` screen at their next login, and clearing
+it works exactly as before. No second Change Password screen was built.
+
+**Account-enumeration decision (documented, per task spec's own
+instruction to "choose a reasonable balance").** A Company Code is not a
+secret (it is already shared openly with every employee for registration,
+and `register` already reveals company-code validity via an identical
+lookup) - so an unknown/inactive company code returns the same specific
+400 message `register` already returns. Once a real, active Organization
+is identified, whether a SPECIFIC EMAIL belongs to an account in it is the
+genuinely sensitive fact: "no matching account", "this account belongs to
+a Manager" (see below), and "a request was successfully created" all
+return the exact same generic 200 message, byte-for-byte indistinguishable
+from one another. Two narrow, deliberate exceptions, each directed by the
+task spec itself: an INACTIVE account gets a distinct, honest message
+(task spec explicitly requires this so deactivation can never be silently
+bypassed), and an ALREADY-PENDING request gets the task spec's own literal
+example message ("A password reset request is already pending review.").
+
+**Duplicate-request protection.** Checked in the controller first (fast,
+clear message) and enforced at the database level by a partial unique
+index (`{userId, status}` unique WHERE `status === 'pending'`) - the same
+pattern `models/User.js` already uses for "at most one system_admin" -
+closing the narrow race-condition window between the check and the
+insert.
+
+**Inactive-user behavior.** An inactive Employee/Operator's Forgot
+Password submission never creates a request at all - they are told to
+contact their Organization Manager directly. This is a deliberate, minor
+trade-off against pure enumeration-resistance (it does distinguish
+"exists but deactivated" from "no such account"), directed explicitly by
+the task spec, which is more important than allowing deactivation to be
+silently bypassed through this flow.
+
+**System Admin decision.** System Admin recovery is entirely outside this
+feature, by construction rather than a special case: `system_admin.
+organizationId` is always `null` (DOC-31), so the org-scoped
+`User.findOne({ email, organizationId })` lookup this endpoint uses can
+never match a System Admin account, regardless of what email is
+submitted.
+
+**Manager account decision.** A Manager whose own account needs recovery
+cannot use this flow either - folded into the same generic "no matching
+account" response (never a distinguishing message). This is a direct
+consequence of reusing the existing Manager Reset Password mechanism for
+approval: that mechanism's own `resolveManageableTarget` helper already
+refuses to let a Manager reset another Manager's password ("Managers
+cannot modify another Manager."), so a request targeting a Manager could
+never be fulfilled by anyone in the Organization. A Manager who is locked
+out should contact their System Administrator (who already owns Manager
+account creation/replacement - DOC-34/DOC-49).
+
+**Temporary-password behavior.** This project's existing Manager Reset
+Password flow requires the Manager to TYPE a new password (never
+auto-generates one) - approval reuses that exact same UX and mechanism.
+No temporary password is ever generated, displayed, logged, or stored in
+plaintext anywhere; only its bcrypt hash is ever persisted (unchanged from
+the pre-existing flow).
+
+**Audit Log.** Two new actions, `PASSWORD_RESET_REQUEST_APPROVED` and
+`PASSWORD_RESET_REQUEST_REJECTED` (`models/AuditLog.js`), recorded IN
+ADDITION TO (never instead of) the existing `USER_PASSWORD_RESET` entry
+`performPasswordReset` already writes - the two document different facts
+(a password was reset vs. a specific pending request was formally
+closed out). Creating the `PasswordResetRequest` itself is NOT
+audit-logged: it is a public, pre-authentication action with no actor to
+attribute it to, and the request document itself is already the durable,
+timestamped record of that event.
+
+**Notifications.** A new `PASSWORD_RESET_REQUESTED` type
+(`models/Notification.js`) notifies every active Manager in the
+requesting User's Organization when a request is created - system
+generated (`actorId: null`), since the requester is not authenticated at
+that point. **Deliberately deferred, and documented rather than built**:
+notifying the requesting user when their request is approved/rejected.
+The Notification routes require `requirePasswordChangeCompleted`, so a
+user who has just had their password reset cannot see notifications until
+AFTER they complete the forced Change Password flow - by which point they
+already know the outcome directly (they either successfully logged in
+with the new password, or a rejected request simply means they still
+cannot log in). Building a notification for a state the recipient cannot
+reach yet was judged unnecessary complexity for this ticket.
+
+**Known limitations.** Rejected/approved requests are terminal - both
+review endpoints re-check `status === 'pending'` before acting, so a
+request cannot be replayed after it leaves the pending state; a genuinely
+new Forgot Password submission is required to try again. There is no
+self-service "cancel my own pending request" endpoint in this version
+(the `cancelled` status value exists in the schema for a future ticket to
+use without a migration, but nothing sets it yet).
+
+## DOC-68 - Employee Satisfaction Rating
+
+**Who may rate, and when.** Only the Employee who created a Request may
+rate it - never a Manager or Operator on the Employee's behalf, and never
+another Employee in the same Organization. Rating is allowed ONLY once the
+Request's status is `closed`. `cancelled` gets its own explicit 409
+message rather than being folded into the generic "must be closed"
+wording. Every other non-terminal status (`open`/`in_progress`/`resolved`/
+`reopened`) shares one generic 409 message. `resolved` was deliberately
+NOT chosen as the eligibility point: `resolved` still allows the Employee
+to send the Request back with "Problem Still Exists" (DOC-12), so rating
+at that point could describe a service outcome that is not yet final. No
+stronger reason to deviate from `closed` was found during the audit.
+
+**"Reopened before closing" is structurally impossible to hit.**
+`utils/requestStatusTransitions.js`'s own transition maps have no entry at
+all for `currentStatus: 'closed'` in any role's map - `closed` has zero
+outbound transitions in the current lifecycle. The single `if
+(requestDoc.status !== 'closed') return 409` check in `createRating` is
+therefore already complete protection; there is no separate "was this
+reopened after closing" state to special-case.
+
+**Score and comment.** `score` is a required whole number, 1-5 inclusive,
+validated authoritatively on the backend (`utils/
+requestFieldValidation.js`'s `validateScore`) - `0`, `6`, `2.5`, `"5"`
+(string), arrays, objects, and `NaN` are all rejected with a 400. `comment`
+is optional, plain text only (never HTML), trimmed, max 500 characters; an
+empty or whitespace-only comment normalizes to `null` rather than being
+stored as an empty string. Comments are always rendered as plain text on
+the frontend (`{comment}` in JSX, never `dangerouslySetInnerHTML` or
+`innerHTML`) - there is no formatting/markup support at all, by design.
+
+**Data model.** A separate `RequestRating` model
+(`models/RequestRating.js`), not a field embedded on `Request` - the same
+"separate model + separate endpoints" precedent `Comment`/
+`RequestActivity`/`Notification` already established in this project.
+Fields: `organizationId`, `requestId`, `employeeId`, `operatorId`
+(nullable), `score`, `comment`, `createdAt` only (`updatedAt` is disabled
+- a rating is immutable, see below). `organizationId`/`employeeId` are
+always derived server-side from `req.user`, never accepted from the
+request body.
+
+**One rating per Request, enforced twice.** A fast, clean controller-level
+check (`RequestRating.findOne({ requestId })`) runs first for the common
+case; a PLAIN unique index on `requestId` alone is the real, final,
+database-level guarantee for a genuine race between two concurrent
+submissions. This is deliberately a plain unique index, not a partial one
+- unlike `PasswordResetRequest`'s `{userId, status}` partial index (which
+allows many non-pending requests per user), every `RequestRating`
+document, by definition, belongs to exactly one Request, with no status
+carve-out needed. A duplicate-key error (Mongo code `11000`) from the rare
+race is caught and returned as the exact same clean "This request has
+already been rated." message - never raw Mongo internals.
+
+**Operator attribution.** `operatorId` is derived directly from the
+Request's own `assignedOperatorId` at the moment of rating, never accepted
+from the client. Audited before relying on this: `assignRequestOperator`
+structurally refuses any assign/reassign/unassign attempt unless
+`status === 'open'` (409 otherwise) - so by the time a Request reaches
+`closed`, its `assignedOperatorId` is already fixed and correct, and no
+extra safeguard beyond making the field nullable (for a historical Request
+that was closed while unassigned) was needed.
+
+**Endpoints.**
+- `POST /api/requests/:id/rating` (Employee only, own Request) - accepts
+  only `{ score, comment }`. `employeeId`/`operatorId`/`organizationId`/
+  `requestId`/`createdAt`/`role`/`status` are never read from the body,
+  even if present.
+- `GET /api/requests/:id/rating` (Employee only, own Request) - returns
+  `{ data: null }` (never a 404) when the Request has not been rated yet;
+  a 404 is reserved for "this Request does not exist, or is not yours."
+- `GET /api/requests/ratings/organization` (Manager only, own
+  Organization) - paginated (`limit`/`before`, the same cursor shape
+  `notification.controller.js`/`auditLog.controller.js` already use),
+  with optional `score`/`operator`/date-range filters. Registered ahead of
+  this router's blanket Employee-only gate, the same way every other
+  Manager-only route on this router already is. `/ratings/organization`
+  and `/:id/rating` can never collide regardless of registration order -
+  their second path segments are always different literal strings.
+
+**Cross-organization / anti-enumeration.** Every lookup uses the same
+scoped `Request.findOne({ _id, organizationId, createdBy })` pattern this
+project uses everywhere else - a Request that does not exist, belongs to
+another Organization, or was created by a different Employee, all produce
+the identical 404. The Manager list endpoint's `before` cursor is
+re-validated against the same organization-scoped query, so it can never
+be used to page into another Organization's ratings.
+
+**Immutability.** There is no PATCH or DELETE route for a `RequestRating`
+- once submitted, a rating cannot be edited or withdrawn. No requirement
+for editing was found during the audit, and immutability keeps the
+Manager-facing satisfaction numbers meaningful (a score cannot quietly
+change after being reported on).
+
+**Manager statistics.** `GET /api/requests/statistics/organization`
+(existing DOC-53/DOC-55 endpoint) now also returns a `satisfaction` key -
+`averageScore`, `totalRated`, a `distribution` by star count (5 down to
+1), and a `byOperator` breakdown - added alongside the existing `totals`/
+`byStatus`/`byPriority`/`byCategory`/`byOperator`/`sla` keys, mirroring
+exactly how DOC-55's own `sla` block was added to this same response,
+rather than a redundant second statistics endpoint. `averageScore` is
+`null` (never a fake `0`/`0.0`) when nothing has been rated yet; the same
+`null`-not-`0` rule applies per-Operator, and an Operator with zero
+ratings still appears in `byOperator` (active or inactive) rather than
+being silently omitted.
+
+**Activity Timeline.** A new `SATISFACTION_SUBMITTED` type
+(`models/RequestActivity.js`), recorded once, immediately after a
+successful rating - actor is the Employee, `metadata.score` holds the
+numeric score. The comment text is deliberately NEVER copied into the
+Timeline; `RequestRating` itself is the only place the comment is ever
+stored. A rejected submission (wrong status, duplicate, failed validation)
+creates no Timeline entry at all.
+
+**Notifications: none.** No notification is sent for an ordinary
+satisfaction rating - it is a passive, Manager-pull-facing signal (visible
+via the statistics panel and ratings list), not something requiring
+push-style awareness the way a new pending item does.
+
+**Audit Log: none.** Ordinary Employee satisfaction ratings are not
+Audit-Logged. The Audit Log (DOC-64) exists for administrative/security-
+relevant mutations; `RequestActivity`'s new `SATISFACTION_SUBMITTED` type
+is already the appropriate, complete history record for this action.
+
+**CSV Export (DOC-67).** Two new trailing columns, `Satisfaction Score`
+and `Satisfaction Comment`, added to the existing Organization Requests
+CSV export - implemented, not deferred. Ratings are batch-fetched once
+per export (`RequestRating.find({ requestId: { $in: [...] }, organizationId
+})`), never one query per row. An unrated Request gets an empty string in
+both columns (matching the existing `Cancellation Reason` column's own
+"nothing to say" convention), never `N/A`/`null`. The existing
+RFC4180/formula-injection escaping (`utils/csvExport.js`) is unchanged and
+applies to these two new columns exactly as it does to every other column.
+
+**Historical/inactive users.** `RequestRating` only ever stores
+`employeeId`/`operatorId` references, resolved to a display name at read
+time - Users are never hard-deleted in this project, but a rating whose
+employee/operator can no longer be resolved (defensive only) falls back to
+a safe "Unknown user" rather than crashing the response, the same
+convention `RequestActivity`/`Comment` already use.
+
+**Request deletion.** Audited: this project never hard-deletes a Request
+anywhere, so no cascade-delete behavior for `RequestRating` was needed or
+added. If that ever changes, `RequestRating` documents would need an
+explicit decision at that time (currently, an orphaned rating referencing
+a deleted Request is not a case this codebase can produce).
+
+**Frontend.** Employee: a "Rate Service" star control (1-5, keyboard
+accessible - each star is a real `<button>` with its own "N out of 5
+stars" `aria-label`, filled/empty state carried by glyph, not color alone)
+appears in the expanded detail panel of a closed, own Request
+(`RequestRatingSection.jsx`, dropped into `RequestRow.jsx` gated on
+`viewerRole === 'employee' && request.status === 'closed'`). After
+submission it swaps to a read-only "Your Rating ★★★★★ + comment" display
+with no full page reload, and persists correctly across a revisit/refresh
+(re-fetched via `GET /api/requests/:id/rating`). No "Rated ★★★★★" badge
+was added to the COLLAPSED row - doing so would require either an N+1
+rating fetch per row, or enriching the existing Request list endpoint, a
+larger change outside this ticket's scope; the rating is instead only
+ever shown in the expanded panel, matching how Comments/Activity on the
+same row already behave. Manager: a "Service Satisfaction" section on the
+Manager Dashboard shows average rating (or "N/A"), total rated count, a
+star-count distribution, and a per-Operator ratings table (also "N/A" for
+zero-rating Operators) - all sourced from the existing organization
+statistics fetch, no separate network call needed.
+
+**Test coverage.** A mocked test harness (in-memory fake `Request`/
+`RequestRating`/`User` models injected via Node's own module cache, no
+real MongoDB needed) exercised `createRating`/`getMyRating`/
+`listOrganizationRatings` and the statistics helpers directly: 52 targeted
+assertions across valid submission, every non-closed status rejection,
+cancelled-request rejection, role authorization (Manager/Operator/another
+Employee all rejected, the real creator accepted), cross-organization
+isolation (including the `before`-cursor cross-org paging attempt),
+backend-authoritative score/comment validation (0, 6, 2.5, string,
+array, object, NaN, oversized comment), duplicate protection at both the
+controller and unique-index layers, Activity Timeline integration
+(recorded once, score-only, never on a rejected submission), and Manager
+statistics (null-not-zero for an empty organization, correct aggregation,
+per-Operator N/A for zero ratings, organization scoping) - all 52 passed.
+
+## DOC-69 - Login History & Active Sessions
+
+**Architecture: server-side sessions alongside JWT, not a redesign.**
+Before this ticket, authentication was 100% stateless JWT - once signed, a
+token stayed valid for its whole lifetime (`JWT_EXPIRES_IN`, default 1h)
+with no way to invalidate it early; `middleware/auth.js` could only check
+the token's own signature/expiry and re-read the account's `isActive` flag
+(DOC-38). This ticket adds a `UserSession` record for every login, and
+embeds that session's id in the JWT's own `jti` claim. The JWT still does
+exactly what it always did (its signature proves who is asking); the new
+`UserSession` document is what makes ONE specific login revocable without
+touching the account or any other login.
+
+**JWT / session relationship.** `jwt.sign({ userId, role, jti }, ...)` -
+the only payload change is the added `jti`, a bare random UUID
+(`crypto.randomUUID()`) that is not sensitive on its own (see
+`models/UserSession.js`'s own header comment for why a leaked `tokenId`
+alone grants no access). `middleware/auth.js`'s verification order is now:
+JWT signature -> `jti` present (see compatibility decision below) -> user
+exists -> user active -> session exists -> session belongs to the same
+user -> session not revoked -> session not expired. A session's own
+`expiresAt` is decoded from the just-signed JWT's real `exp` claim, never
+independently re-parsed from `JWT_EXPIRES_IN` - the two can never drift
+apart.
+
+**Pre-DOC-69 token compatibility (documented decision).** A JWT signed
+before this ticket shipped has no `jti` and therefore no corresponding
+`UserSession`. Rather than silently exempting such tokens from revocation
+forever (which would quietly weaken the whole feature for exactly the
+population most likely to still be logged in at deploy time), `verifyToken`
+rejects any token with no `jti` outright, with the exact same
+401 "Invalid authentication token." response as any other invalid token.
+The person simply logs in again once; their account, password, and data
+are completely unaffected. Given this project's default 1-hour JWT
+lifetime, any pre-DOC-69 token still in use at deploy time would have
+expired naturally within the hour regardless - this only makes that
+cutover immediate and unambiguous instead of silently partial.
+
+**Session creation (login).** `auth.controller.js`'s `login` generates a
+fresh `tokenId` (`services/userSession.service.js`'s `generateTokenId` -
+the ONLY place a tokenId is ever produced, once per successful login,
+never client-suppliable - task spec's session-fixation requirement),
+creates the `UserSession` document, then signs the JWT referencing it. The
+login response contract (`{ token, user }`) is completely unchanged.
+
+**IP / User-Agent handling and limitations.** `ipAddress` is always
+`req.ip` (server-observed only - never accepted from the request body).
+`req.ip` already respects this app's existing, explicitly opt-in
+`TRUST_PROXY` configuration (`app.js`) - if a production deployment sits
+behind a proxy that is NOT declared via `TRUST_PROXY`, `req.ip` will show
+the proxy's own address rather than the real client IP; this is an
+accepted, pre-existing limitation of this app's proxy configuration, not
+new to this ticket. `userAgent` is `req.get('user-agent')`, capped at 300
+characters, stored and displayed as-is - it is DISPLAY METADATA ONLY and
+is never read by any authorization decision anywhere in this project.
+
+**lastActiveAt throttling.** Updated on an authenticated request only if
+more than 5 minutes have passed since the last write (`services/
+userSession.service.js`'s `LAST_ACTIVE_THROTTLE_MS`) - a single targeted
+`updateOne` by `_id`, never a write on every request.
+
+**Session expiry.** No scheduler, no cron, no TTL index. `active = revokedAt
+is null AND expiresAt > now`, computed identically everywhere
+(`classifySessionStatus`/`isSessionActive` in `services/userSession.
+service.js` - "centralize logic"). A naturally-expired session is simply
+classified `EXPIRED` at read time and remains in Login History; nothing
+deletes it.
+
+**Endpoints** (`routes/auth.routes.js`):
+- `POST /api/auth/logout` - revokes the CURRENT session. A third explicit
+  exception to `requirePasswordChangeCompleted` (alongside `GET /me` and
+  `PATCH /change-password`) - a user forced to change password must always
+  be able to log out.
+- `GET /api/auth/sessions` - up to the 30 most recent sessions (active +
+  historical) for the caller, newest first, each with a computed `status`
+  (`ACTIVE`/`REVOKED`/`EXPIRED`) and `isCurrent` flag. Never returns a JWT,
+  `tokenId`/`jti`, or `passwordHash`.
+- `DELETE /api/auth/sessions/:sessionId` - revokes exactly one of the
+  caller's OWN sessions. Scoped `{ _id, userId }` (never just `_id`) - a
+  nonexistent id and another user's id both produce an identical 404
+  (task spec's anti-enumeration requirement). Idempotent: revoking an
+  already-inactive session is a safe no-op, never a second error, and
+  never overwrites the original `revokedAt`/`revokedReason`.
+- `POST /api/auth/sessions/logout-others` - revokes every OTHER active
+  session for the caller; the current session is always excluded.
+- `POST /api/auth/sessions/logout-all` - revokes EVERY active session for
+  the caller, including the current one; the frontend treats a successful
+  call exactly like pressing Logout.
+
+**User isolation (stricter than organization isolation).** Every one of
+the four endpoints above is scoped by `userId: req.user.userId` ONLY -
+never by `organizationId`, never by role. Not even a Manager can list or
+revoke another user's sessions through any endpoint in this project,
+regardless of Organization membership - a deliberately stricter boundary
+than this project's usual DOC-38 organization-scoped isolation.
+
+**Password-change revocation policy.** `changePassword` (self-service)
+revokes every OTHER active session (`PASSWORD_CHANGED` reason) - the
+current session (the one that just proved the current password) is
+excluded and may remain valid, so the person who just correctly
+authenticated is never forced to immediately re-login on the same device.
+
+**Password-reset revocation policy.** `performPasswordReset`
+(`user.controller.js` - the ONE shared function both a direct Manager
+reset and a DOC-70-approved `PasswordResetRequest` reset call) revokes
+ALL of the target's active sessions (`PASSWORD_RESET` reason) - there is
+no "current session" to protect here, since the ACTOR is the Manager, not
+the target. Runs identically regardless of which of the two callers
+invoked it. A new `SESSIONS_REVOKED_AFTER_PASSWORD_RESET` Audit Log entry
+is recorded when at least one session was actually revoked.
+
+**Deactivation revocation policy.** `updateUserStatus` revokes ALL of the
+target's active sessions (`USER_DEACTIVATED` reason) only on a GENUINE
+deactivation (not an idempotent re-deactivation of an already-inactive
+account, and never on reactivation). A new
+`USER_SESSIONS_REVOKED_ON_DEACTIVATION` Audit Log entry is recorded when
+at least one session was actually revoked. Reactivation only flips
+`isActive` back - it never restores sessions revoked at deactivation time;
+the user simply logs in again for a fresh one.
+
+**Profile UI (`frontend/src/pages/Profile.jsx` +
+`ActiveSessionsPanel.jsx`).** A new "Security / Active Sessions" section:
+the current session is shown with a `Current` badge and no revoke control
+(a dedicated Logout already exists in the Navbar for ending it - the same
+"prevent it, provide separate Logout" choice as the task spec's own
+example UI); every other active session gets its own `Log out` button,
+plus a shared `Log out of all other sessions` button and (for
+completeness, since the backend endpoint exists) a `Log out of all
+sessions` button. Below that, a "Recent Login History" list shows up to
+30 entries with a human-readable device label (`utils/userAgentLabel.js`
+- a small, dependency-free User-Agent -> "Chrome on Windows"-style parser,
+display-only, never used for any authorization decision) and a status
+label (`utils/sessionStatusLabel.js` - centralizes the REVOKED reason ->
+label mapping, e.g. "Logged out (password reset)", using only the
+backend's own controlled `revokedReason` enum, never arbitrary text).
+
+**Existing Logout upgraded, not replaced.** `AuthContext.jsx`'s `logout()`
+now calls the new `POST /api/auth/logout` endpoint with the token about to
+be discarded, wrapped in try/catch, and ALWAYS falls through to clearing
+local state regardless of outcome - a network failure or an already-
+revoked token can never leave a person stuck mid-logout (existing Logout
+UX is unchanged from the caller's point of view).
+
+**Audit Log decision.** Two new actions,
+`SESSIONS_REVOKED_AFTER_PASSWORD_RESET` and
+`USER_SESSIONS_REVOKED_ON_DEACTIVATION` (`models/AuditLog.js`) - both
+security-sensitive, OTHER-directed events (one person's action ending
+ANOTHER user's sessions). Ordinary, everyday, SELF-directed session
+activity (login, logout, revoking one's own session, logging out one's
+own other sessions) is deliberately NOT Audit-Logged - it is fully visible
+to the acting user themselves via their own Login History
+(`GET /api/auth/sessions`), and recording it there is a better fit than a
+second, administrative-facing copy of the same fact.
+
+**Notifications: none.** No notification is sent for an ordinary login,
+logout, or self-service session revoke - matching this ticket's own
+explicit default ("do not create a notification for every login").
+
+**Indexes.** Exactly three on `UserSession` (task spec: "do not add
+excessive indexes"): a unique index on `tokenId` (the one lookup
+`verifyToken` performs on every authenticated request), `{ userId: 1,
+createdAt: -1 }` (list/history, newest first), and `{ userId: 1,
+revokedAt: 1, expiresAt: 1 }` (the "which of my sessions are active" shape
+used by both the list endpoint and the bulk-revoke endpoints).
+
+**No plaintext token storage.** `UserSession` never stores the JWT itself,
+never stores a plaintext refresh/access token - only `tokenId` (the `jti`,
+a bare random identifier with no authentication power on its own; see this
+model's own header comment).
+
+**Test coverage.** A mocked test harness (in-memory fake `User`/
+`UserSession`/`Request` models injected via Node's own module cache, real
+`bcryptjs`/`jsonwebtoken` packages, no real MongoDB needed) exercised
+`login`/`logout`/`changePassword`, `middleware/auth.js`'s full verification
+chain, all four session-management endpoints, `performPasswordReset`, and
+`updateUserStatus` directly: 42 targeted assertions across session
+creation (jti/tokenId linkage, org-null-safety for System Admin, userAgent/
+createdAt/expiresAt correctness, no raw JWT persisted), multiple
+independent sessions per user, listing (own-only, current flagged,
+ACTIVE/REVOKED/EXPIRED classified correctly, no raw tokenId/JWT exposed),
+revocation (cross-user 404, invalid-id 400, idempotent repeat, immediate
+JWT rejection), logout-others (correct count, already-inactive sessions
+never double-counted), logout (immediate JWT rejection, fresh session on
+re-login), password change (other sessions revoked, current session
+policy honored), Manager/DOC-70 password reset (ALL target sessions
+revoked, `mustChangePassword` still required, another user unaffected,
+Audit Log entry recorded), deactivation (all sessions revoked, old JWT
+rejected, reactivation does not restore old sessions, fresh session on
+new login, Audit Log entry recorded), role isolation (Employee/Operator/
+Manager/System Admin can each only manage their own sessions), the
+pre-DOC-69 no-`jti` compatibility rejection, and session-fixation
+resistance (a client-supplied `jti` has zero effect on login) - all 42
+passed.
+
+## DOC-71 - Enhanced User Profile: Profile Picture + Bio
+
+**What this adds.** Two new self-service fields on top of the existing My
+Profile feature (DOC-62): a short plain-text **Bio** (optional, trimmed,
+max 250 characters) and a **Profile Picture** (one current image per
+user, JPEG/PNG/WEBP, 5 MB max). Both are edited only by the account
+itself - a Manager cannot set an Employee's bio/photo, and nobody can set
+role/organizationId/isActive/email/specialties through this or any other
+self-service path (those remain permanently out of scope for
+`PATCH /api/users/me`, unchanged from DOC-62).
+
+**Bio validation (`backend/src/utils/userFieldValidation.js`).**
+`validateBio` mirrors the existing `validateRatingComment` (DOC-68)
+shape: `undefined`/`null`/empty-after-trim all normalize safely to `null`
+(clearing a bio is a normal action, not an error); a non-string
+(object/array/number) is rejected outright, checked before `.trim()` is
+ever called; over 250 characters is rejected with a client-safe message.
+**Bio is plain text only, by construction, not by sanitization** - this
+project never strips HTML or scripts from it, because the frontend never
+renders it through `dangerouslySetInnerHTML`/`innerHTML` (see
+`frontend/src/pages/Profile.jsx` - it only ever appears inside a
+`<textarea>` value and, on display, as an escaped React text node). A
+value like `<script>alert(1)</script>` is stored and returned completely
+unmodified and is therefore always inert.
+
+**Profile image storage architecture - the audit decision.** The task's
+own explicit instruction was "do NOT reuse Request image metadata blindly
+without auditing whether a shared storage abstraction is appropriate."
+`services/requestImageStorage.js` was read in full before writing any new
+code, and its three operations turned out to be Request-*shaped*, not
+generic: `buildObjectKey` hardcodes
+`organizations/{orgId}/requests/{requestId}/before|completion/{uuid}.ext`,
+and every function signature requires a `requestId`/`attachmentType`
+neither of which a profile image has. Forcing a fake `requestId` through
+that module just to satisfy its signature would have been exactly the
+"blind reuse" the ticket warns against. The resolution: a new, independent
+`services/profileImageStorage.js` module (S3 + GridFS, same dual-provider
+shape, its own small S3-client cache and MIME-to-extension map) was
+written instead, and the ONE piece that genuinely was safely generalizable
+- `services/gridFsStorage.js`'s single hardcoded `'requestImages'` bucket
+- was extended with an **optional** `bucketName` parameter on all five of
+its exported functions, defaulting to `'requestImages'` everywhere so
+every existing Request-image call site is completely unaffected. No Base64
+is ever stored in the `User` document - only a small reference/metadata
+subdocument (`objectKey`/`fileId`/`mimeType`/`size`), the actual bytes
+always live in GridFS or S3.
+
+**Storage namespace.** S3 key prefix: `profiles/{userId}/{uuid}.ext` -
+keyed by `userId` alone, deliberately NOT `organizationId` the way Request
+attachments are, because System Admin's own `organizationId` is always
+`null` (DOC-31); a userId-only scheme works uniformly for every role with
+no null special-case. GridFS bucket: a dedicated `'profileImages'` bucket
+(`profileImages.files`/`profileImages.chunks`), completely separate from
+Request images' own `'requestImages'` bucket - a profile image and a
+Request attachment can never collide, be listed together, or be
+cross-referenced by id.
+
+**One current image per user, safe replacement order.** Uploading a new
+image: (1) upload the new bytes to storage, (2) save the new reference on
+the `User` document, (3) **only after both of those have already
+succeeded**, best-effort delete the OLD image's bytes. A cleanup failure
+at step 3 is logged and swallowed - it never undoes or fails the
+already-successful new upload (task spec: "failure to delete old image
+must not destroy new update"). The very first upload for a user
+(no previous image) never attempts a delete at all.
+
+**Endpoints.**
+- `POST /api/users/me/profile-image` - self only, `multipart/form-data`
+  field name `profileImage`, reuses the EXACT SAME Multer instance/
+  fileFilter/size-limit (`middleware/upload.js`'s `uploadMemory`) Request
+  images already use - no separate, looser validation was introduced.
+  Returns the caller's full sanitized user object.
+- `DELETE /api/users/me/profile-image` - self only, idempotent (calling it
+  with no image already set still returns 200, never an error).
+- `GET /api/users/:userId/profile-image` - streams the image bytes through
+  an authenticated proxy (never a raw/public storage URL) - the same
+  pattern `AuthenticatedRequestImage.jsx`/`getRequestAttachmentContent`
+  already established for Request images, necessary because this project
+  has no cookie-based session and a plain `<img src>` cannot attach the
+  required `Authorization` header.
+
+**Self-service derivation, never trusts a URL param.** Both write
+endpoints take no `:userId` in their route at all - the target is always
+`req.user.userId`, the same trusted, database-backed identity
+`middleware/auth.js` already establishes on every request. There is
+structurally no way to upload or delete on another user's behalf,
+regardless of what a client sends in the body.
+
+**Read authorization - same-organization visibility.** `GET
+/api/users/:userId/profile-image` allows exactly two cases: viewing your
+OWN image (always), or viewing an image belonging to a user who shares
+your own **non-null** `organizationId`. A System Admin's own
+`organizationId` is always `null`, so this rule naturally means nobody
+else can ever view a System Admin's avatar, and a System Admin can never
+view anyone else's - each can still always view their own. A nonexistent
+user, an unauthorized (cross-organization) user, and a user with no image
+set all return the identical `404 Profile image not found.` - never a
+distinguishing `403`, so a caller can never use this endpoint to enumerate
+which user ids exist in another Organization.
+
+**`sanitizeUser` extensions.** `bio` (string or `null`), `hasProfileImage`
+(boolean), and `profileImage` (`{ url, updatedAt }` or `null`) - `url` is
+always the authenticated content-proxy path above, **never** the raw
+`objectKey`/`fileId`/storage credentials. `url` carries its own
+`?v=<updatedAt-timestamp>` cache-busting query parameter, computed from
+the profile image subdocument's own `updatedAt` (its `timestamps:
+{ updatedAt: true }` bumps this exactly when - and only when - the image
+itself is replaced), so a browser/CDN can cache the image aggressively
+without ever serving a stale one after a replacement.
+
+**Frontend.** `Profile.jsx` gained an avatar section above the existing
+Full Name field: `Avatar.jsx` (large size) shows the current image or
+falls back to initials (e.g. "Mahmoud Khashan" -> "MK", via
+`utils/initials.js`) - **never a broken-image icon**, whether there is no
+image at all, the fetch is still in flight, or it fails for any reason.
+Choosing a new file shows a local, client-only preview (via
+`URL.createObjectURL`, client-side MIME/size validation - the backend
+remains authoritative) before the user confirms "Save Photo"; "Remove
+Photo" is idempotent and only shown once an image actually exists. The
+Bio field is a `<textarea>` with a live character counter, saved together
+with Full Name through the same existing `PATCH /api/users/me` call.
+`AuthContext`'s existing `updateUser(...)` (unchanged from DOC-57/DOC-62)
+is reused for every one of these mutations - the new bio/avatar appear
+immediately everywhere `user` is read, with **no logout/login and no page
+reload** required.
+
+**Navbar avatar - deliberately deferred.** The task spec's own minimum
+requirement is the Profile page only ("Navbar/Dashboard avatar display -
+optional"). Given the scope already covered here, a Navbar avatar was
+left out of this pass rather than rushed; `Avatar.jsx` was built as a
+fully reusable, prop-driven component (`{ profileImageUrl, fullName }`)
+specifically so adding one later is a small, low-risk follow-up.
+
+**Chat-readiness, without building Chat.** `Avatar.jsx`'s entire public
+contract is `{ profileImageUrl, fullName }` - exactly the two fields
+`sanitizeUser` already returns for any user. A future Organization Chat
+feature (DOC-60 already exists read/write for messages) could render an
+avatar next to a message by reusing this component completely unchanged,
+passing whatever minimal shape the Chat API already carries - no new
+avatar component, and no storage-architecture change, would be needed.
+Direct Messages were explicitly NOT implemented (out of scope, per the
+task's own instruction).
+
+**Audit Log - no noisy entries.** An ordinary bio-only or photo-only
+change creates **zero** Audit Log entries. `bioChanged: true` (a boolean
+flag only - never the bio text itself) rides along as extra `metadata`
+**only** on an already-triggered `PROFILE_UPDATED` entry, i.e. only when
+`fullName` also changed in the very same request. Profile image
+upload/delete never touch the Audit Log at all - there was no existing
+`PROFILE_UPDATED`-shaped trigger for them to safely ride along on without
+inventing a new, noisier logging path the task explicitly warned against.
+
+**Notifications - none.** No Notification is generated for a bio or
+profile-image change, matching this ticket's own explicit instruction.
+
+**Old image cleanup - documented tradeoff.** Deleting the old image's
+bytes after a successful replace/remove is always best-effort: a failure
+is logged server-side via `console.error` and otherwise ignored. This
+means a very rare storage failure can leave an orphaned file in GridFS/S3
+that nothing will ever reference again - an accepted tradeoff (identical
+in spirit to `requestImageStorage.js`'s own `deleteImage`) because the
+alternative (blocking or failing the user's own successful upload/delete
+on a cleanup failure) would be strictly worse.
+
+**Security - filenames and MIME.** The stored object's name/key is always
+server-generated (`crypto.randomUUID()` plus an extension taken only from
+an internal MIME-to-extension map) - the client's original filename is
+never read or trusted for anything, including for the extension. MIME
+type is validated against `middleware/upload.js`'s existing
+`ALLOWED_MIME_TYPES` allowlist (the multipart part's declared
+Content-Type, not the filename) - the exact same check, and the exact
+same 5 MB size limit, Request images already use.
+
+**Test coverage.** A mocked test harness (fake `User` model and
+`profileImageStorage` service injected via Node's own module cache, the
+real `updateMyProfile`/`uploadMyProfileImage`/`deleteMyProfileImage`/
+`getUserProfileImageContent`/`sanitizeUser` production code running
+unmodified against them, no real MongoDB/S3/GridFS needed) ran 71 targeted
+assertions: bio validation (9), profile image upload (9), replacement (6,
+including the ordering guarantee that the old image is only deleted after
+the new one is confirmed saved), delete (4, including idempotency),
+authorization (10, covering the self/same-organization/System-Admin
+edge cases and confirming upload/delete never read `req.params`/
+`req.body` for identity), image read isolation (5, including the missing-
+bytes-is-still-a-clean-404 case and response headers), AuthContext
+contract (5, mixing a runtime response-shape check with static source
+checks that `Profile.jsx`/`AuthContext.jsx`/`Avatar.jsx` never touch
+`localStorage`/the token and never render a broken-image icon), and
+regression coverage for DOC-62 (5), DOC-69 (4), DOC-67/DOC-68 (4), and
+storage isolation (5, including a live assertion that
+`gridFsStorage.js`'s zero-argument call sites still throw the exact same
+error as before the `bucketName` parameter was added). All 71 passed.
+
+## DOC-70 - Organization Chat Attachments
+
+**What this adds.** Organization Chat (DOC-60) messages can now carry 0-3
+file attachments alongside (or instead of) text. A message is valid
+whenever its trimmed text is non-empty OR at least one attachment was
+uploaded - an empty-text, zero-attachment submission is still rejected,
+exactly as before this ticket.
+
+**Supported file types.** A conservative, useful set: `image/jpeg`,
+`image/png`, `image/webp`, `application/pdf`, and `text/plain` -
+executables, scripts, HTML, SVG (no existing sanitization policy to point
+to), and archives are all deliberately excluded.
+
+**Size/count limits.** 10 MB per attachment (`middleware/chatUpload.js`'s
+own `MAX_CHAT_ATTACHMENT_SIZE_BYTES`, deliberately larger than the 5 MB
+Request/Profile image ceiling - a PDF is often bigger than a compressed
+photo), and a maximum of 3 attachments per message
+(`MAX_ATTACHMENTS_PER_MESSAGE`) - enforced by Multer's own `limits`
+option AND, defensively, a second check inside `chat.controller.js`'s
+`createMessage` in case this handler is ever reached a different way.
+Both limits are backend-authoritative; the frontend validates the same
+values early for UX only.
+
+**Storage architecture - the audit decision.** Before writing any new
+storage code, `services/requestImageStorage.js` was read in full again:
+its `buildObjectKey` hardcodes a Request-shaped path
+(`organizations/{orgId}/requests/{requestId}/before|completion/{uuid}.ext`)
+and every function signature requires a `requestId`/`attachmentType` a
+chat attachment simply does not have. Reusing it directly would have been
+exactly the "blind reuse" the task spec warns against. The resolution -
+identical in shape to DOC-71's own `profileImageStorage.js` decision - is
+a new, independent `services/chatAttachmentStorage.js` module (S3 +
+GridFS, its own small S3-client cache and MIME-to-extension map), reusing
+only the one piece that is genuinely generic: `services/gridFsStorage.js`'s
+`bucketName` parameter (added in DOC-71, now used by a SECOND caller with
+its own distinct value, exactly as that ticket anticipated). No Base64 is
+ever stored in a `ChatMessage` document, and no attachment binary is ever
+embedded there - only a small reference/metadata subdocument
+(`originalName`/`mimeType`/`size`/`objectKey`/`fileId`/`uploadedAt`).
+
+**GridFS bucket / S3 prefix.** A dedicated GridFS bucket,
+`'chatAttachments'` (`chatAttachments.files`/`chatAttachments.chunks`),
+completely separate from `'requestImages'` and `'profileImages'`. S3 key
+prefix: `chat/{organizationId}/{userId}/{uuid}.ext` - unlike
+`profileImageStorage.js`'s userId-only scheme (needed there specifically
+for System Admin's null `organizationId`), every Organization Chat
+participant is guaranteed to have a real `organizationId` (System Admin
+never participates in chat - unchanged from DOC-60), so the prefix safely
+includes it, mirroring the Organization isolation already enforced at the
+query level.
+
+**Message-create flow.** `POST /api/chat/messages` remains ONE atomic
+multipart endpoint (task spec's own recommended shape, avoiding an
+orphaned-upload-prone separate upload-first flow): validate text/files
+first -> upload each file to storage -> create the `ChatMessage` with the
+resulting reference metadata -> return the sanitized response. If the
+`ChatMessage.create()` call itself fails after files were already
+uploaded, every attachment already uploaded for that request is
+best-effort deleted (logged and swallowed on failure, matching DOC-71's
+own documented cleanup tradeoff) so a rare failure never leaves more than
+the unavoidable minimum of orphaned storage.
+
+**Attachment-read endpoint.**
+`GET /api/chat/messages/:messageId/attachments/:attachmentId/content` -
+authenticated, same chain as list/create (manager/operator/employee,
+active Organization). Streams bytes through Node - never a raw GridFS/S3
+URL.
+
+**Organization isolation / IDOR protection.** The `ChatMessage` is always
+looked up FIRST as `{ _id: messageId, organizationId:
+req.user.organizationId }` in one query - a nonexistent message and one
+belonging to another Organization produce the identical 404, so a caller
+can never distinguish "wrong id" from "right id, wrong Organization" (the
+same DOC-38 anti-enumeration convention this project's other cross-tenant
+lookups already use). The attachment is then resolved ONLY from that
+already-organization-scoped message's own `attachments` subdocument array
+- never a separate global lookup by attachment id alone, which is exactly
+the pattern the task spec warns against (it would let a leaked
+attachmentId from another Organization skip the Organization check
+entirely). A valid attachment id paired with the WRONG message id (even
+within the same Organization) is also rejected.
+
+**Filename/header safety.** The stored attachment's `originalName` is
+kept and displayed verbatim (always as plain React text, never HTML) but
+is passed through `sanitizeContentDispositionFilename` before ever
+reaching an HTTP header - CR/LF/NUL and quote/backslash characters are
+stripped, preventing header injection via a crafted filename. Images get
+`Content-Disposition: inline`; PDF/text get `attachment` - both include an
+RFC 5987 `filename*=UTF-8''...` value alongside the plain `filename="..."`
+one, so non-ASCII names round-trip safely too.
+
+**Frontend composer.** OrganizationChat.jsx gained an 📎 Attach button
+(hidden file input, `accept` aligned with the backend's allowlist),
+a selected-file list with per-file Remove (reusing the existing
+`.selected-image-list` convention from Request image uploads), a small
+local image preview via `URL.createObjectURL` for image files, and a
+disabled Send button while a submission is pending or nothing valid is
+selected. `chatApi.send` now always posts `FormData` (a text-only message
+is simply a FormData object with zero `attachments` entries).
+
+**Image/PDF rendering.** A new `AuthenticatedChatAttachment.jsx`
+component (deliberately independent from `AuthenticatedRequestImage.jsx`/
+`Avatar.jsx` - the same "mirror the pattern, don't couple" precedent
+DOC-71 established) fetches an image attachment's bytes via an
+authenticated `fetch()` and renders an object-URL thumbnail; a PDF/text
+attachment renders a lightweight file card (icon, filename, size, "Open")
+with ZERO network activity until the person actually clicks Open - a
+further optimization beyond what was asked, since a chat full of PDF
+links then costs nothing extra until opened.
+
+**Polling/memory behavior.** Attachment metadata is polled every 7
+seconds exactly like the rest of a message (unchanged interval) - never
+the bytes themselves. `AuthenticatedChatAttachment`'s own fetch effect is
+keyed on the attachment's `url` STRING, not the parent message object's
+identity; since a chat attachment is immutable and write-once, that URL
+string never changes across polls for an unchanged attachment, so React's
+by-value dependency comparison means an unaffected attachment is never
+re-fetched, regardless of how many times the surrounding message object
+is replaced by a fresh poll response. Object URLs are revoked on
+unmount/replacement in every code path that creates one (selected-file
+preview, rendered image, opened PDF/text).
+
+**Failure UX.** Unsupported file type, oversized file, and
+too-many-attachments all surface as clear, specific messages (never a raw
+Multer/S3/GridFS error - the same DOC-65 safe-error discipline every
+other upload feature in this project already follows). A chat image that
+fails to load shows "Unable to load attachment" plus its filename, never
+the browser's own broken-image icon.
+
+**Storage cleanup.** Best-effort only, exactly like DOC-71's own
+profile-image cleanup: a failure is logged server-side via
+`console.error` and never surfaces storage internals (bucket names,
+object keys, credentials) to the client. There is no attachment-only
+delete - chat messages remain fully immutable (no PATCH/DELETE route was
+added, task spec section 32), so there is no "replace" or "remove one
+attachment" flow to protect either.
+
+**Avatar integration - deferred.** Displaying an Avatar next to each chat
+message was audited and NOT implemented in this pass: doing so safely
+would require a new, chat-specific safe-fields sanitizer for the resolved
+author (the existing DOC-71 `sanitizeUser` exposes `email`/`bio`/
+`organizationId`/`isActive` - fields that must never leak into an
+Organization-wide feed every member polls every few seconds) plus the
+same polling-safe-fetch design attachments already needed - a second,
+independent scope of work the task spec explicitly permitted deferring.
+
+**Notification/Audit Log decisions.** No Notification is generated for a
+chat attachment (chat is Organization-wide, not targeted - DOC-72
+@Mentions will later provide targeted notifications). No Audit Log entry
+is created for a normal chat message/attachment - this is not an
+administrative action, the same category DOC-64's own Audit Log scope
+already excludes ordinary business activity from.
+
+**Direct Message readiness.** `chatAttachmentStorage.js`'s public
+functions (`uploadAttachment`/`getAttachmentStream`/`deleteAttachment`)
+take only `{ organizationId, userId, mimeType }` - no `ChatMessage`- or
+"channel"-specific concept is baked into the storage key or function
+signatures. A future DOC-73 Direct Message feature could call these exact
+same functions unchanged for a private conversation's attachments, at
+most adding its own distinct GridFS bucket constant if isolation from
+Organization Chat's own attachments is later desired - no redesign of
+this module would be required. Direct Messages themselves were **not**
+implemented in this ticket.
+
+**Test coverage.** A mocked test harness (fake `ChatMessage`/`User`
+models and `chatAttachmentStorage` service injected via Node's own module
+cache, the real `createMessage`/`listMessages`/`getChatAttachmentContent`/
+`sanitizeContentDispositionFilename` production code running unmodified
+against them, no real MongoDB/S3/GridFS needed) ran 68 targeted
+assertions: text/attachment combinations (6), file validation (8),
+metadata (8), read authorization (7), storage/provider abstraction and
+failed-save cleanup (6), frontend composer/rendering static contract
+checks (11), a consolidated cross-Organization attack test (1), and
+regression coverage for Organization Chat (8), DOC-71 (4), Request
+storage (5), and DOC-67/68/69 (4). All 68 passed.
+
+## DOC-72 - @Mentions in Organization Chat
+
+**What this adds.** A person composing an Organization Chat message
+(DOC-60) can type `@` to open a suggestion dropdown of same-Organization,
+active, chat-eligible coworkers, pick one, and send the message. Every
+person mentioned that way receives an in-app `CHAT_MENTION` notification
+(DOC-18) - unless they mentioned themselves.
+
+**Mentions are userId-based, never name-based.** The task's own core
+design constraint: a mention's canonical identity is a validated MongoDB
+`ObjectId`, never a `fullName`/email string. Names are not unique and can
+change; an id is stable forever. `ChatMessage.mentionedUserIds` (new
+field, `models/ChatMessage.js`) stores ONLY an array of `ObjectId`
+references (`ref: 'User'`, max 10, defaulting to `[]`) - never a copy of
+the mentioned user's name, role, or profile image. The human-readable
+`@Full Name` text the message actually displays lives in `content`
+itself, typed once at send time and never rewritten afterward.
+
+**Fresh-resolution-at-read-time, not a frozen snapshot.** Every time a
+message is listed (`GET /api/chat/messages`), `mentionedUserIds` is
+resolved against the CURRENT `User` documents (batched into one query per
+page via `buildUserLookupMap`, covering both message authors and
+mentioned users together - never N+1) and returned as
+`mentions: [{ id, fullName }]`. If a mentioned person is later renamed,
+the frozen `@OldName` text inside `content` and the freshly-resolved
+current name in `mentions` can legitimately disagree - this is documented
+and intentional (task spec: "Do not rewrite historical chat content"). A
+mention of a since-DEACTIVATED user is resolved the exact same way an
+author already is (`buildUserLookupMap` never filters by `isActive`), so
+a historical mention keeps showing that person's real name, never
+"Unknown user" or a placeholder, purely because they were later
+deactivated.
+
+**Who can be mentioned.** Exactly the same population that can
+participate in Organization Chat at all: active members of the sender's
+own Organization with role `manager`, `operator`, or `employee`
+(`utils/chatMentionValidation.js`'s `ALLOWED_MENTION_ROLES`) - System
+Admin is structurally excluded, the same way it already cannot read or
+send chat messages at all.
+
+**Same-organization enforcement, twice.** The composer's own suggestion
+endpoint (`GET /api/chat/mention-users?q=`) only ever searches
+`req.user.organizationId`, and `createMessage` independently
+re-validates every submitted id against the database at send time
+(`User.find({ _id: { $in: ... }, organizationId: req.user.organizationId,
+isActive: true, role: { $in: ALLOWED_MENTION_ROLES } })`) - the dropdown
+is a convenience, never the source of authorization. A hand-crafted
+request that spoofs a cross-Organization, inactive, System Admin, or
+simply nonexistent id is rejected with the exact same generic message,
+`"One or more mentioned users could not be found."`, so a prober can
+never learn which of those reasons applied to a given id (the same
+DOC-38 anti-enumeration discipline this project already applies to every
+other cross-tenant lookup).
+
+**Reject-entirely, never partially apply.** If even one id in a
+submitted `mentionUserIds` list fails validation, the WHOLE message is
+rejected with that one generic 400 - never silently dropping the bad
+mention and sending the rest with the valid ones applied.
+
+**Payload shape.** `POST /api/chat/messages` (already multipart since
+DOC-70) gained one more optional text field: `mentionUserIds`, a
+JSON-stringified array of user id strings (e.g. `'["<id1>","<id2>"]'`).
+Parsed via `JSON.parse` inside a try/catch (`parseMentionUserIdsField`) -
+never `eval`. Malformed JSON, a non-array, non-string entries, or more
+than 10 raw entries are all rejected before any database round trip;
+valid entries are deduplicated (case-sensitive string dedup, sufficient
+since every surviving entry is already a canonical 24-character hex
+`ObjectId` string) before the same-organization/active/role check runs
+against the database.
+
+**Duplicate mentions and the 10-user cap.** The same user id listed more
+than once in one message produces exactly one notification, never one
+per occurrence - deduplication happens before both the database
+validation query and the notification-dispatch loop. A message may
+mention at most 10 unique users (`MAX_MENTIONS_PER_MESSAGE`), enforced at
+three independent layers: the raw-JSON-array-length check (before any
+DB work), the deduplicated-count check (after resolution), and a schema-
+level `mentionedUserIds` validator on `ChatMessage` itself (defense in
+depth against a future code path that might construct a document without
+going through the controller).
+
+**Self-mentions.** A person mentioning themselves is accepted and stored
+structurally (their own message can visually show `@Sam Sender`) but
+never generates a self-notification - checked twice, independently:
+`createMessage`'s own dispatch loop explicitly filters the sender out of
+the recipient list before ever calling `createNotification`, AND
+`createNotification` (`services/notification.service.js`) itself
+separately re-checks `actorId === recipientId` and silently no-ops -
+neither guard depends on the other being correct.
+
+**Notification type: `CHAT_MENTION`.** Added to
+`models/Notification.js`'s `NOTIFICATION_TYPES`. Title is always "You
+were mentioned in Organization Chat"; message is always
+`"{sender's current fullName} mentioned you in a chat message."`;
+`metadata` carries only `{ chatMessageId }` - never a copy of the
+message's actual text or attachments (task spec: "Do not duplicate full
+chat message contents unnecessarily"). `requestId` is always `null` -
+this notification type has no Request association. Clicking a
+`CHAT_MENTION` notification (`NotificationBell.jsx`) navigates to `/chat`
+- this project has no message-anchor/scroll-to-message mechanism, so it
+intentionally just opens the chat page, exactly like `chatMessageId`
+being present-but-unused today for that possible future enhancement.
+
+**Notification failures never fail the message.** `createNotification`
+was already unconditionally best-effort (never throws) before this
+ticket; `createMessage`'s own dispatch loop runs AFTER the message has
+already been saved and is additionally wrapped in its own try/catch
+purely so a hypothetical bug in the dispatch loop itself could never turn
+an already-successful send into a 500. Message persistence is always the
+primary, non-negotiable outcome.
+
+**Mention suggestion endpoint.** `GET /api/chat/mention-users?q=<text>`
+(same manager/operator/employee + organization-membership + active-
+organization gate as the rest of `chat.routes.js`) returns up to 8
+same-Organization, active, allowed-role candidates matching a
+case-insensitive substring of `fullName` (reusing
+`utils/requestQueryBuilder.js`'s existing `escapeRegExp`, never a second
+copy of that escaping logic), sorted alphabetically. Response fields are
+deliberately minimal: `{ id, fullName, role, hasProfileImage }` - never
+`email`, `bio`, `isActive`, `organizationId`, or any other User-document
+internal. A missing/empty `q` returns a same-Organization browse list
+rather than an error; an over-long `q` (>100 characters) is rejected with
+400. No existing endpoint could safely serve this: `GET /api/users` is
+Manager-only and returns far more fields than a mention chip ever needs.
+
+**Frontend mention UX (`OrganizationChat.jsx`).** Typing `@` (at the
+start of the message or right after whitespace, with no whitespace typed
+since) opens a debounced (200ms) suggestion dropdown querying the new
+endpoint; ArrowUp/ArrowDown/Enter/Tab/Escape navigate, select, or dismiss
+it without disrupting the existing Enter-sends/Shift+Enter-newline
+composer behavior. Selecting a suggestion inserts the CURRENT
+`@Full Name ` text into the draft (stable display text) while separately
+tracking the real userId in a `selectedMentions` `Map<userId, fullName>`
+- the id is never later reconstructed by parsing the typed text. If the
+person deletes an inserted `@Full Name` substring before sending, that
+entry is pruned from `selectedMentions` automatically. On send, only
+`Array.from(selectedMentions.keys())` - the real, tracked ids - is passed
+to the backend as `mentionUserIds`; the backend re-validates every one of
+them regardless; this is UX convenience only, never the authorization
+boundary. The dropdown shows initials-only "avatars" (no per-keystroke
+authenticated image fetch - `hasProfileImage` is returned by the backend
+but intentionally unused, the same performance-first choice DOC-70 made
+for the message list's own Avatar integration).
+
+**Safe mention rendering, never `dangerouslySetInnerHTML`.** A message's
+`content` and its server-resolved `mentions: [{ id, fullName }]` array
+are passed through `renderContentWithMentions` - a plain, greedy,
+left-to-right scan using `String.prototype.startsWith` (longest name
+first, so "Ahmad" can never incorrectly "win" inside "Ahmad Saleh") that
+produces an array of plain strings and `<span className="chat-mention">`
+React elements. This is a pure DISPLAY tokenizer only - it is never
+consulted for authorization or notification decisions, both of which
+already happened server-side at send time using the real, validated
+`mentionedUserIds`.
+
+**Attachment compatibility.** Mentions work identically whether a
+message is text-only, attachment-only, or both together - an
+attachment-only message with `mentionUserIds` set still creates real
+mentions and real notifications (no "invisible mentions" limited to
+text-only messages). An empty-text, zero-attachment, mentions-only
+submission is still rejected exactly as before DOC-72 - a mention alone
+does not satisfy the "must have text or an attachment" rule.
+
+**Historical/compatibility.** `mentionedUserIds` defaults to `[]` for
+every message sent before this ticket - no migration is required, and
+`sanitizeChatMessage` always returns `mentions: []` for such a message
+rather than `undefined`, so the frontend's rendering path never needs a
+special case for old data.
+
+**Polling unchanged.** No new polling process was introduced -
+`CHAT_MENTION` notifications ride the existing DOC-18
+`NotificationBell.jsx` polling interval exactly like every other
+notification type, and mentioned messages ride the existing 7-second
+Organization Chat poll exactly like every other message.
+
+**Test coverage.** A second mocked test harness (the same require.cache-
+injection pattern: fake `ChatMessage`/`User` models and a fake
+`notification.service`, the real `createMessage`/`listMessages`/
+`searchMentionUsers`/`parseMentionUserIdsField` production code running
+unmodified against them) ran 55 targeted assertions: pure
+`parseMentionUserIdsField` parsing/shape validation (12), valid/multiple/
+duplicate mentions and notification dispatch (5), self-mention behavior
+(2), invalid-mention rejection including the identical-error cross-org/
+inactive/System-Admin/nonexistent/partial-invalid cases (7), attachment
+compatibility across text-only/attachment-only/both/neither (5),
+notification-dispatch failure resilience (1), `listMessages` fresh-
+resolution and historical-compatibility (3), `searchMentionUsers`
+behavior including the result-count cap and organization isolation (8),
+security/spoofing checks (3), frontend static contract checks confirming
+no `dangerouslySetInnerHTML` usage and consistent mention wiring across
+`OrganizationChat.jsx`/`api.js`/`NotificationBell.jsx` (6), and regression
+coverage confirming plain/attachment-only/both-empty sends behave exactly
+as DOC-70 left them (3). All 55 passed.
+
+## DOC-73 - Private Direct Messages
+
+**What this adds.** Secure, private 1:1 messaging between exactly two
+members of the same Organization - reachable at `/messages`, separate from
+Organization Chat (`/chat`). A conversation is visible and writable ONLY
+to its own two participants; nobody else - not a Manager, not System
+Admin - can read or send into it without being one of those two people.
+
+**A dedicated architecture, deliberately NOT merged into Organization
+Chat.** The read-only audit (this ticket's own mandatory first phase)
+concluded the two features have fundamentally incompatible authorization
+models: Organization Chat's entire point is "any active same-Organization
+member may read everything"; a DM's entire point is the opposite -
+"exactly these two people, and only these two people, may ever read this
+thread". Conflating the two collections/routers would mean every single
+read/write query needs an extra conditional branch forever, for no
+benefit. Two new models were introduced instead:
+`DirectMessageConversation` (the small, per-pair parent document) and
+`DirectMessage` (one document per message, its own collection - never
+embedded inside the conversation, so message volume never threatens the
+16MB BSON ceiling the same way Notification/RequestActivity/ChatMessage
+already avoid it).
+
+**Exactly two distinct participants, no group chat.** Enforced at the
+schema level, not just by controller convention -
+`DirectMessageConversation.participantIds` has its own validator that
+rejects any document without exactly two entries, or with the same id
+twice.
+
+**No duplicate conversations - the participantKey.** `participantKey` is
+`[userIdA, userIdB].sort().join(':')` - identical regardless of who
+started the conversation - carrying a UNIQUE `{organizationId,
+participantKey}` index. "Alice messages Bob" and "Bob messages Alice"
+always resolve to the exact same document; a race between two concurrent
+"start conversation" requests is handled by catching the index's own
+duplicate-key error and re-reading the now-existing conversation, rather
+than failing the second request.
+
+**Same-Organization, active-user, allowed-role enforcement - twice.**
+`POST /api/direct-messages/conversations` accepts ONLY `{ recipientId }` -
+never `participantIds`/`senderId`/`organizationId`/`role`. The recipient
+is independently re-validated against the database
+(`organizationId: req.user.organizationId, isActive: true, role: { $in:
+['manager','operator','employee'] }`) with a SINGLE generic rejection
+message covering every failure reason (nonexistent, cross-Organization,
+inactive, System Admin/disallowed role) - the same DOC-38/DOC-72
+anti-enumeration convention this project already uses, so a prober can
+never learn which specific reason applied to a crafted id.
+
+**System Admin is excluded with NO special-case code.** System Admin's
+`organizationId` is always `null` (enforced by `models/User.js`'s own
+schema validator, unrelated to this ticket) - and is additionally
+structurally rejected before ever reaching a single line of this
+controller, since `routes/directMessage.routes.js`'s own `requireRole(
+'manager', 'operator', 'employee')` never includes it, exactly the same
+gate Organization Chat already uses. There is no
+`if (role === 'system_admin')` bypass anywhere in this feature.
+
+**The one rule every conversation-scoped endpoint shares:
+`loadAuthorizedConversation`.** A single function in
+`directMessage.controller.js` is the ONLY place that decides "may this
+caller touch this conversation" - `listMessages`, `sendMessage`,
+`markConversationRead`, and `getAttachmentContent` all call it first, none
+of them re-implements the check inline. It requires BOTH
+`organizationId: req.user.organizationId` AND `req.user.userId` present in
+`participantIds` - a conversation that does not exist, one from another
+Organization, and one the caller simply is not a participant of (even a
+Manager, even for two of their own Employees) all resolve to the
+IDENTICAL generic 404, `"Conversation not found."` - verified directly by
+a dedicated test that a non-participant Manager and a cross-Organization
+user get byte-identical status/message for the same conversation id.
+**There is no Manager-bypass and no System-Admin-bypass anywhere in this
+feature** - confirmed by dedicated tests (a Manager who is not one of the
+two participants is rejected exactly like a random Employee would be).
+
+**Conversation list, user search, message pagination.**
+`GET /api/direct-messages/users?q=` mirrors DOC-72's own mention-search
+shape (case-insensitive substring on `fullName`, same-Organization,
+active, allowed-role only, minimal `{id, fullName, role, hasProfileImage}`
+fields, capped at 8 results) but additionally excludes the caller
+themselves. `GET /api/direct-messages/conversations` returns only
+conversations where the caller is a participant - never full message
+history, just `{id, otherParticipant, lastMessagePreview, lastMessageAt,
+unreadCount}` per conversation.
+`GET /api/direct-messages/conversations/:id/messages` uses the identical
+`before`/`limit` cursor-pagination shape `chat.controller.js`'s own
+`listMessages` already established (newest-first internally, reversed to
+chronological order for the response).
+
+**Send: text/attachment/both, sender always server-derived.**
+`POST /api/direct-messages/conversations/:id/messages` accepts multipart
+`content` (optional text) + `attachments` (0-3 files) - valid whenever
+trimmed text is non-empty OR at least one attachment exists, rejected only
+when both are empty (identical rule to DOC-70's own ChatMessage). `senderId`
+is ALWAYS `req.user.userId` - there is no code path that ever reads a
+sender identity from the request body; a forged `senderId`/`organizationId`
+in the payload is simply never read, confirmed by a dedicated test. If the
+OTHER participant has since been deactivated, a NEW send is blocked with a
+safe `409 "This user is currently inactive."` - checked fresh on every
+send, never cached from conversation-creation time - while the
+conversation and every historical message remain fully intact and
+readable for the still-active participant.
+
+**Attachments: reused upload middleware, independent storage namespace.**
+The read-only audit found DM attachment rules to be byte-for-byte
+identical to Organization Chat's own (JPEG/PNG/WEBP/PDF/TXT, 10MB/file,
+3 files/message) - `middleware/chatUpload.js`'s existing Multer instance
+is reused UNCHANGED for DM uploads (creating a second, identical Multer
+config would be pure duplication). The underlying STORAGE is still fully
+independent: a new `services/dmAttachmentStorage.js` (mirroring
+`chatAttachmentStorage.js`'s own already-DM-ready
+`{organizationId, userId/conversationId, mimeType}` contract, exactly as
+that file's own DOC-70 comment anticipated) writes to its own dedicated
+GridFS bucket (`directMessageAttachments`) and S3 prefix
+(`dm/{organizationId}/{conversationId}/{uuid}.ext`) - never mixed with
+`chatAttachments`/`requestImages`/`profileImages`. The attachment content
+endpoint (`GET .../messages/:messageId/attachments/:attachmentId/content`)
+reuses the exact same IDOR-protection shape as DOC-70: participant check
+first, then message scoped to that conversation, then the attachment
+resolved ONLY from that message's own subdocument array - never a global
+lookup by attachment id alone.
+
+**Per-participant read state, not a global boolean.**
+`DirectMessageConversation.readStates` is a structured array
+(`[{userId, lastReadAt}]`, exactly two entries) rather than a single
+`read` boolean (which cannot represent "read by A but not yet by B") or a
+Map keyed by a dynamic ObjectId (which the task's own spec flagged as
+awkward). `POST /api/direct-messages/conversations/:id/read` updates ONLY
+the caller's own entry - the other participant's entry is never read or
+written by that call. Unread count for a conversation is `messages where
+senderId != me AND createdAt > my own lastReadAt` (`null` lastReadAt =
+"never opened, everything is unread"); the conversation LIST computes this
+for every conversation in ONE batched aggregation query (grouping by
+conversationId across an `$or` of per-conversation thresholds) rather than
+one `countDocuments` call per conversation.
+
+**Denormalized preview - no per-conversation N+1 on the list.**
+`lastMessageAt`/`lastMessagePreview` live directly on
+`DirectMessageConversation`, updated once whenever a message is
+successfully sent - so listing conversations never needs a second query
+per conversation to find "what was the last message". The preview is
+always a short, already-truncated, already-safe plain-text string; an
+attachment-only message previews as the fixed string `"Sent an
+attachment"`, never a filename or MIME type.
+
+**Notification: `DIRECT_MESSAGE`, generic wording, best-effort.** Added to
+`models/Notification.js`'s `NOTIFICATION_TYPES`. Title is always "New
+message"; message is always `"{sender's current fullName} sent you a
+private message."` - the actual private message text is never copied into
+the notification. `metadata` carries only `{conversationId, messageId}`.
+Dispatched AFTER the message has already been saved, wrapped in its own
+try/catch even though `createNotification` itself already never throws
+(defense in depth) - a notification failure never loses the message
+(verified by a dedicated test that forces the notification call to
+throw). Self-notification is prevented twice, independently: the
+controller never targets the sender, and `createNotification`'s own
+`actorId === recipientId` guard is a second backstop. Clicking a
+`DIRECT_MESSAGE` notification (`NotificationBell.jsx`) navigates to
+`/messages` - `metadata.conversationId` is present but intentionally
+unused today (this project has no scroll-to-conversation mechanism, the
+same documented limitation `CHAT_MENTION`'s own `chatMessageId` already
+has).
+
+**No @mentions inside a DM.** A 1:1 conversation has only one other
+possible participant, so a structural mention concept would be pure
+ceremony - a literal `@text` a person types remains completely ordinary
+text, never tokenized or highlighted.
+
+**No admin surveillance endpoints.** There is no "list all conversations",
+"read any conversation", or "export DM history" endpoint anywhere in this
+feature, for any role including System Admin - this ticket is
+intentionally, permanently participant-private. No DM content, filename,
+or participant pairing is ever written to the Audit Log (DOC-64) - normal
+private messaging is not an administrative action.
+
+**Immutable, like Organization Chat.** No edit/delete endpoint exists for
+either a conversation or a message - `routes/directMessage.routes.js` has
+no PATCH/DELETE route at all.
+
+**User-state transitions.** A role change (Employee → Operator, etc.)
+never breaks an existing conversation - the conversation is keyed by
+`userId`, not role. Reactivating a previously-deactivated participant
+lets the SAME conversation resume (the unique `participantKey` index
+guarantees no duplicate is ever created). This project has no
+organization-transfer feature for an existing User (audited and
+confirmed: `models/User.js`'s `organizationId` is only ever set once, at
+account-creation time, for every role) - so a DM becoming cross-
+Organization-accessible after the fact is not a reachable state today; if
+such a feature is ever introduced, every read/write in this controller
+already re-derives and re-checks `organizationId` fresh on every request
+rather than trusting a cached value, so it would fail closed rather than
+silently leak.
+
+**Frontend `/messages`.** A two-pane layout (conversation list + active
+conversation) reusing Organization Chat's own proven polling/auto-scroll/
+attachment-selection patterns wherever the underlying UX problem is
+identical (task spec: "Reuse Organization Chat behavior if suitable") -
+conversation list polls every 15 seconds, the open conversation polls
+every 5 seconds (skipped entirely while the tab is hidden), auto-scroll
+only fires when the viewer is already near the bottom, and attachments
+reuse `AuthenticatedChatAttachment.jsx` UNCHANGED (it was already fully
+generic - only `{url, mimeType, originalName, size}` - no new component
+needed). Avatars reuse `Avatar.jsx` UNCHANGED: the backend only ever
+returns `hasProfileImage` (never a full URL, mirroring DOC-72's own
+mention-dropdown minimalism), and the frontend builds the
+`/users/:userId/profile-image` URL itself, since that endpoint already
+authorizes any same-Organization viewer. On narrow viewports exactly one
+pane is shown at a time with a back button - it is a CSS-only
+responsive change, never a desktop-width requirement. A "Messages" Navbar
+link shows its own independent unread badge (`DirectMessageNavBadge.jsx`)
+- deliberately never merged visually with `NotificationBell.jsx`'s own
+count, per the task's own explicit instruction.
+
+**Test coverage.** A third mocked test harness (the same require.cache-
+injection pattern as DOC-70/72: fake `DirectMessageConversation`/
+`DirectMessage`/`User` models and a fake `notification.service`, the real
+`directMessage.controller.js` production code running unmodified against
+them) ran 67 targeted assertions: conversation creation across every
+allowed role pair plus reverse-pair idempotency/self/inactive/cross-org/
+System-Admin rejection (11), privacy enforcement including the critical
+Manager-non-bypass and identical-404-shape checks (7), send validation
+including forged sender/organization fields (8), attachment upload/
+authorization/IDOR checks (8), per-participant read-state and unread-count
+behavior (5), notification dispatch/privacy/failure-resilience (7),
+user-state transitions - deactivation blocks new sends while preserving
+history, reactivation resumes the same conversation, role change is a
+no-op (5), a consolidated security-attack simulation (Manager/cross-org
+conversation-id guessing, mismatched attachment/message pairing, forged
+recipientId/senderId/organizationId) (6), frontend static contract checks
+(5), and regression confirming Organization Chat/DOC-70/DOC-72/notification
+infrastructure remain structurally untouched (5). All 67 passed.
+
+## DOC-74 - Organization Policies & Guidelines
+
+A centralized, per-Organization knowledge/compliance area: Managers create
+and maintain policies scoped to their own Organization; Employees/
+Operators read the currently-published ones and may optionally record
+that they have read a given policy; Managers can see adoption/compliance
+statistics for the policy's current version.
+
+**Two dedicated models, never an embedded array.** `OrganizationPolicy`
+(`organizationId`, `title`, `content`, `category`, `isPublished`,
+`version`, `status`, `archivedAt`, `createdBy`, `updatedBy`) and
+`PolicyAcknowledgement` (`organizationId`, `policyId`, `userId`,
+`policyVersion`, `acknowledgedAt`) are both top-level collections, the
+same "unbounded child data lives in its own collection" reasoning
+Notification/RequestActivity/ChatMessage/DirectMessage already
+established for this project - the read-only audit confirmed
+`Organization.js` holds only a small, fixed set of scalar settings today,
+and adding an unbounded policy list directly onto it would risk the same
+16MB BSON ceiling those other features already avoid.
+
+**Plain text only - CRITICAL.** `content` is a plain `String` field with
+no HTML-aware type or sanitizer. It is stored completely unmodified
+(never HTML-stripped or escaped at write time) because the frontend NEVER
+renders it via `dangerouslySetInnerHTML`/`innerHTML` - `Policies.jsx`
+always renders `{detail.content}` as ordinary React text, with CSS
+`white-space: pre-wrap` preserving the author's own line breaks. A policy
+whose content is literally `<script>alert(1)</script>` is stored exactly
+as typed and always displays as harmless text, never executes - the same
+"storage is honest, rendering is safe" contract `User.bio` (DOC-71)
+already established. `title`/`content`/`category` are all validated by a
+small, dedicated `utils/policyFieldValidation.js` (title required/
+trimmed/max 150 chars, content required/max 10,000 chars, category a
+controlled enum: GENERAL/SECURITY/IT/SAFETY/HR/OPERATIONS/OTHER).
+
+**Versioning.** `version` starts at 1 and is incremented ONLY when a
+genuinely meaningful field changes - `title`, `content`, or `category`.
+Toggling `isPublished` alone (publish/unpublish with no content change)
+never bumps the version. Versioning matters because acknowledgement is
+version-scoped (see below): a person who acknowledged version 1 of a
+policy never silently counts as having acknowledged version 2's different
+wording.
+
+**Draft vs. Published vs. Archived.** `isPublished` (Boolean) and `status`
+(`ACTIVE`/`ARCHIVED`) are two independent flags. A Manager can see every
+combination in their own Organization; an Employee/Operator can only ever
+see a policy that is BOTH `isPublished: true` AND `status: 'ACTIVE'` -
+enforced entirely server-side (`loadAuthorizedPolicy` in
+`policy.controller.js`), never hidden only by the frontend. Archiving
+(`PATCH /api/policies/:policyId/archive`, its own dedicated endpoint, not
+part of the general update whitelist) deliberately does NOT force
+`isPublished` back to `false` - `status: 'ARCHIVED'` alone is already
+sufficient to hide the policy from non-Managers, so `isPublished` is left
+untouched as an honest historical record of whether the policy was
+published at the moment it was archived. There is no hard-DELETE anywhere
+in this feature and no un-archive endpoint (soft-archive only) - a
+`PolicyAcknowledgement.policyId` must always resolve to a real document
+for a Manager's own historical compliance reporting to stay meaningful.
+
+**Anti-enumeration for non-Managers.** A single generic 404 ("Policy not
+found.") covers three different underlying reasons for an Employee/
+Operator: the id does not exist at all, it belongs to a different
+Organization, or it is a real, same-Organization policy that simply is
+not currently visible to that role (a draft or an archived policy). This
+is deliberate - a distinguishing error would itself leak "a draft with
+this id exists in your Organization" to someone who is not supposed to
+know that.
+
+**Field allowlists, never mass assignment.** `POST /api/policies` accepts
+only `{title, content, category, isPublished}`; `PATCH
+/api/policies/:policyId` whitelists the same four fields via explicit
+`hasOwnProperty` checks. `organizationId`, `createdBy`, `updatedBy`,
+`version`, and `status` are NEVER read from the request body on either
+route, even if a client sends them - they are always server-derived
+(`req.user.organizationId`/`req.user.userId`) or server-computed
+(version increment, `status`).
+
+**Acknowledgement.** `POST /api/policies/:policyId/acknowledge` - the
+policy must belong to the caller's own Organization (else 404) and be
+currently published + active (else 400); `userId` is always
+`req.user.userId`, never accepted from the body. A unique index on
+`PolicyAcknowledgement{policyId, userId, policyVersion}` makes
+acknowledging the same version twice a database-level no-op; the
+controller's own find-first check is the fast path, and a race between two
+concurrent acknowledge calls is handled by catching that index's own
+duplicate-key error and returning the now-existing row - the identical
+pattern `DirectMessageConversation` creation (DOC-73) already established.
+A brand-new user automatically sees every currently-published policy but
+gets NO auto-created acknowledgement row - they remain unacknowledged
+until they actually confirm. Acknowledging is deliberately NOT audit-
+logged (task spec: "normal acknowledgement is not an administrative
+action") - it is already durably, permanently recorded in
+`PolicyAcknowledgement` itself.
+
+**Compliance statistics - decisions, documented.** The eligible population
+for both the Manager's list-view acknowledgement summary and the
+per-policy acknowledgement detail (`GET
+/api/policies/:policyId/acknowledgements`) is **active Employees and
+Operators only** - Managers are excluded from both the denominator and the
+returned user list (even though a Manager is technically allowed to
+acknowledge a policy too), and an inactive Employee/Operator is excluded
+as well. This follows the task's own "compliance reporting should
+primarily focus on organization users" guidance. Every acknowledgement
+counted is scoped to the policy's CURRENT `version` only - an old-version
+acknowledgement never inflates today's percentage. Both the list view (one
+summary per policy) and the detail view batch their queries (one eligible-
+user fetch, one aggregate/find over `PolicyAcknowledgement`) rather than
+running one query per policy or per user.
+
+**Notifications.** `POLICY_PUBLISHED` and `POLICY_UPDATED` were added to
+`Notification.NOTIFICATION_TYPES`. A single documented rule decides when
+to notify: dispatch when the policy is published AFTER the request
+completes AND EITHER this is a newly-published draft OR an
+already-published policy just received a genuinely meaningful content
+change while remaining published. This one condition correctly excludes
+draft saves, unpublish actions, and a no-op publish-flag save with no
+content change - and correctly fires exactly once for a request that does
+both (a brand-new policy created already published). Recipients are the
+same active-Employee/Operator population the compliance statistics use.
+`message` is always the fixed, generic string "New organization policy
+available." and `metadata` contains ONLY `{policyId}` - never the title or
+any content. Draft saves, minor edits to a still-unpublished draft, and
+archiving never notify anyone.
+
+**Audit Log.** Five actions were added: `POLICY_CREATED`, `POLICY_UPDATED`,
+`POLICY_PUBLISHED`, `POLICY_UNPUBLISHED`, `POLICY_ARCHIVED` (plus
+`'OrganizationPolicy'` added to `TARGET_TYPES`). `POLICY_UPDATED` is
+recorded ONLY when a real title/content/category field changed - a pure
+publish/unpublish toggle with no content change gets its own dedicated
+`POLICY_PUBLISHED`/`POLICY_UNPUBLISHED` entry instead, so a publish-only
+request never produces two audit rows describing the same single action.
+`changedFields` metadata never includes the actual content - only field
+NAMES that changed, plus `policyId`/`title`/`version`. A create that goes
+live immediately (`isPublished: true` on creation) records only
+`POLICY_CREATED` (with `metadata.isPublished: true`), not a second,
+redundant `POLICY_PUBLISHED` entry for the same request.
+
+**Frontend `/policies`.** One shared page for all three allowed roles
+(the same established pattern as `/chat` and `/messages`) - `Policies.jsx`
+renders an Employee/Operator two-pane read view (policy list + detail,
+with the acknowledgement button/status) or a Manager management view
+(a table with Edit/Publish-Unpublish/Archive/Acknowledgements actions,
+plus a simple Create/Edit form - a title input, a category select, a
+plain `<textarea>`, and a Published checkbox; no rich-text editor, no HTML
+toolbar) based on `user.role` - the backend remains the sole authority on
+what data each role actually receives. The acknowledgement button reads
+"I Have Read and Understand This Policy", deliberately never implying
+legal consent beyond what is actually recorded. `NotificationBell.jsx`
+navigates a `POLICY_PUBLISHED`/`POLICY_UPDATED` notification to
+`/policies`.
+
+**Test coverage.** A fourth mocked test harness (the same require.cache-
+injection pattern as DOC-70/72/73: fake `OrganizationPolicy`/
+`PolicyAcknowledgement`/`User` models plus fake `Notification`/`AuditLog`
+models backing the REAL, unmodified `notification.service.js`/
+`auditLog.service.js`, with the real `policy.controller.js` production
+code running against all of them) ran 100 targeted assertions: creation
+including field-spoofing rejection, validation limits, and literal XSS
+storage (16), publish-visibility across every role/status combination
+including the uniform-404 guarantee (14), update/versioning including
+mass-assignment rejection and cross-org failure (10), acknowledgement
+including idempotency, version-scoped uniqueness, and cross-org rejection
+(11), compliance statistics denominator/percentage correctness (8),
+notification dispatch-trigger correctness across every draft/publish/
+update/unpublish/archive transition (11), Audit Log correctness including
+the no-duplicate-entry-on-repeat-archive check (5), a cross-org/malformed-
+id security-attack simulation (6), route-level `requireRole('manager')`
+static contract checks (7), and frontend static contract checks including
+verifying the app never uses `dangerouslySetInnerHTML` (8). All 100
+passed. A separate, clean-process regression check confirmed every
+existing model/controller/route (DOC-60/61/64/67/68/69/70/72/73) plus
+every new DOC-74 file load together in one shared Node process with no
+circular dependency and no `OverwriteModelError`.
+
+## DOC-75 - Organization Q&A / Knowledge Board
+
+A persistent, searchable Q&A area, deliberately distinct from Organization
+Chat: Chat is real-time/transient communication that scrolls away; the
+Knowledge Board is structured, permanent organizational knowledge meant to
+be found again later via search, category, and status filters. Employees/
+Operators/Managers in the same Organization ask questions, anyone active
+in that Organization may answer, and the question's own author (or a
+Manager) may mark one answer accepted.
+
+**Two dedicated collections, never an embedded array.** `KnowledgeQuestion`
+(`organizationId`, `authorId`, `title`, `content`, `category`, `status`,
+`acceptedAnswerId`, `answerCount`, `viewCount`) and `KnowledgeAnswer`
+(`organizationId`, `questionId`, `authorId`, `content`) - the same
+"unbounded child data lives in its own collection" reasoning
+Notification/ChatMessage/DirectMessage/DOC-74's own
+OrganizationPolicy+PolicyAcknowledgement split already established. Every
+answer carries its own `organizationId`/`questionId` denormalized from the
+already-authorized parent question, so an answer-scoped lookup is always a
+single flat, fully-scoped query (task spec section 41's own "ANSWER
+IDOR... all must match" requirement) - never a global answer lookup
+trusted against a separately-supplied questionId.
+
+**Category decision, documented.** A controlled, fixed enum (GENERAL/IT/
+NETWORK/COMPUTERS/ELECTRICITY/PLUMBING/MAINTENANCE/SECURITY/HR/OTHER) -
+NOT a reuse of `ServiceCategory`. The read-only audit found
+`ServiceCategory` is a Manager-owned, per-Organization, DYNAMIC list tied
+specifically to Request routing and Operator specialty-matching (DOC-43/
+DOC-44); a brand-new Organization starts with zero Service Categories
+until a Manager creates some, and a Manager may deactivate one at any time
+for Request-routing reasons unrelated to Q&A content. Coupling the
+Knowledge Board's own categorization to that list would make asking a
+question depend on unrelated Request-routing configuration. A small fixed
+enum - the exact one the task spec itself suggests - always exists and
+can never be emptied out from under this feature.
+
+**Plain text only - CRITICAL.** `content` (question and answer) is a plain
+`String` field with no HTML-aware type or sanitizer - Knowledge.jsx always
+renders it as ordinary React text (`{detail.content}` / `{answer.content}`),
+never `dangerouslySetInnerHTML`/`innerHTML`, the same "storage is honest,
+rendering is safe" contract `OrganizationPolicy.content` (DOC-74) already
+establishes. CSS `white-space: pre-wrap` preserves line breaks.
+
+**Question status - centralized transition logic.** `OPEN` (no accepted
+answer) / `ANSWERED` (an accepted answer exists) / `CLOSED` (author or
+Manager intentionally ended discussion). Every transition is decided by
+exactly one small, pure module - `utils/knowledgeStatusTransitions.js` -
+never re-derived ad hoc in a controller: accepting an answer always
+produces `ANSWERED`; removing the accepted answer ("unaccept") always
+produces `OPEN`; closing always produces `CLOSED` regardless of the prior
+state; reopening returns to `ANSWERED` if an accepted answer still exists
+or `OPEN` otherwise. This project's own documented EXTENSION of the task
+spec's six explicit rules: a `CLOSED` question also fully blocks
+accept/unaccept and editing (of either the question or its answers) -
+none of the task spec's own six rules describe a "CLOSED + accept"
+transition, so rather than leave it undefined, closing is treated as a
+full lock; a Manager or the author must reopen first.
+
+**Permissions.** Ask: employee/operator/manager, same Organization only
+(System Admin structurally excluded - never in
+`requireRole('manager', 'operator', 'employee')`). Answer: any ACTIVE
+same-Organization member of those three roles, including the question's
+own author. Accept/unaccept/close/reopen: the question's own author OR a
+same-Organization Manager - enforced inside the controller
+(`isOwnerOrManager`), not at the route level, since a static route-level
+role gate cannot express "the author OR a Manager" (the author may be an
+Employee or Operator). Edit question/edit answer: the CONTENT's own author
+only - Manager moderation-editing of someone else's question/answer text
+is explicitly NOT implemented in this version (documented decision - no
+requirement calls for it, and silently rewriting another user's words
+would be a surprising, undocumented capability).
+
+**Endpoints** (`/api/knowledge`): `POST /questions`, `GET /questions`
+(pagination + search + category/status filters + sort), `GET
+/questions/:id`, `PATCH /questions/:id` (author only, blocked while
+CLOSED), `POST /questions/:id/close`, `POST /questions/:id/reopen`, `GET
+/questions/:id/answers`, `POST /questions/:id/answers` (rejected 409 while
+CLOSED), `PATCH /questions/:id/answers/:answerId` (answer author only),
+`POST /questions/:id/answers/:answerId/accept`, `DELETE
+/questions/:id/accepted-answer` ("unaccept", idempotent). No DELETE route
+for a question or an answer itself anywhere (task spec section 23 -
+"Prefer no delete in first version" - persistent knowledge is not expected
+to disappear casually; there is not even a soft-delete field, since no
+requirement in this ticket calls for removing content once posted).
+
+**Field allowlists, never mass assignment.** `POST /questions` accepts
+only `{title, content, category}`; `POST /questions/:id/answers` accepts
+only `{content}`. `organizationId`/`authorId`/`status`/`acceptedAnswerId`/
+`answerCount`/`viewCount` are NEVER read from the request body on any
+route, even if a client sends them - always server-derived or
+server-computed.
+
+**Search.** Case-insensitive substring match over `title` + `content`,
+regex-escaped via this project's own `utils/requestQueryBuilder.js`
+`escapeRegExp` (never a raw user-supplied `RegExp`) - the identical
+"never let a caller inject a potentially catastrophic-backtracking
+pattern" guard DOC-54's own Request search and DOC-72's own mention search
+already established, reused a third time rather than re-implemented.
+
+**Pagination - a documented deviation.** Simple PAGE-BASED pagination
+(`page` + `limit`, skip/limit), NOT the `limit` + `before`-cursor
+convention Organization Chat/Direct Messages/Audit Log all share. That
+cursor shape is specifically suited to an append-only, always-newest-
+first, real-time feed; it has no natural meaning for `sort=mostAnswered`
+(a value that can change out from under a stable point-in-time cursor),
+and page numbers work identically regardless of which of the three sort
+options (`newest`/`oldest`/`mostAnswered`) is active. This is the same
+"persistent/searchable knowledge vs. transient/real-time communication"
+distinction the ticket itself draws between Q&A and Chat, reflected
+directly in the pagination choice.
+
+**Answer count - denormalized, server-controlled only.** `answerCount` is
+incremented via a single atomic `$inc` immediately AFTER a `KnowledgeAnswer`
+document has actually been saved - never speculatively before, so a failed
+answer creation can never increment it, and never trusted from the client.
+
+**View count - optional, best-effort.** Incremented via a single atomic
+`$inc` on `GET /questions/:id`, fire-and-forget - its own failure is only
+ever logged, never surfaces to the caller, and never slows down the
+primary read response (task spec section 36: "do not prioritize over core
+functionality").
+
+**Author data.** Minimal only - `{id, fullName, role, hasProfileImage}`,
+the identical shape chat/DM/policy already return. Never email/bio/
+sessions/organization internals. A deactivated author's historical
+question/answer still resolves and displays their real name (never
+filtered by `isActive` - the same "historical author remains visible"
+rule Organization Chat's own `buildUserLookupMap` already established);
+only NEW content creation is blocked for an inactive user (enforced by
+`requireActiveOrganization`/the auth layer generally, not by this
+feature's own code).
+
+**Notifications.** `KNOWLEDGE_ANSWER_ADDED` (dispatched to the question's
+author whenever someone else answers) and `KNOWLEDGE_ANSWER_ACCEPTED`
+(dispatched to the accepted answer's author whenever someone else accepts
+it) were added to `Notification.NOTIFICATION_TYPES`. Both are best-effort
+and self-notify-guarded (checked explicitly at the call site AND
+independently inside `createNotification` itself - defense in depth, the
+same shape DOC-72/73/74 already use) and carry ONLY `{questionId,
+answerId}` in `metadata` - never the answer's own text. `NotificationBell.jsx`
+navigates either type to `/knowledge?questionId=<id>` - Knowledge.jsx
+reads that query parameter on load and opens the matching question detail
+directly, a small, real "open questionId" behavior (not a scroll-anchor)
+satisfying the task spec's own "ideally open questionId if current
+navigation system supports metadata" hint without overbuilding.
+
+**Audit Log - deliberately quiet.** Normal Q&A activity (asking, answering,
+accepting) is NEVER audit-logged - it is ordinary user activity, not an
+administrative action. Exactly ONE new action exists,
+`KNOWLEDGE_QUESTION_CLOSED_BY_MANAGER`, recorded ONLY when a Manager closes
+a question authored by a DIFFERENT user - a genuine moderation action over
+content the Manager does not own. A Manager closing their own question is
+never logged.
+
+**Upvotes and attachments - both deferred, documented.** Neither is part
+of this version. Upvotes were explicitly optional/non-core per the task
+spec; attachments were explicitly recommended for deferral (Organization
+Chat already handles file sharing, and adding a second, parallel
+attachment pathway here would expand scope without a stated requirement).
+Both can be added later as independent, additive features without any
+schema change to the core ask/answer/accept/search functionality shipped
+here.
+
+**No @mentions.** Deliberately not implemented here (task spec section
+38) - Organization Chat's own mention parser stays a Chat-only feature;
+Q&A's own notification semantics (question author, accepted-answer
+author) already cover the two recipients this ticket actually needs.
+
+**Frontend `/knowledge`.** One shared page for all three allowed roles - a
+searchable/filterable card-grid list (title, category, status, answer
+count, author, relative time) plus a single-column question detail view
+(question body, answers oldest-first with the accepted one visually
+highlighted, an answer-composer, and inline Accept/Close/Reopen/Edit
+controls shown only to the question's own author or a Manager, mirroring
+exactly what the backend already allows - never a control that the
+backend would then reject). Avatars reuse `Avatar.jsx` (DOC-71) unchanged.
+Empty states: "No questions yet. Be the first to ask a question." and "No
+answers yet. Know the answer? Help your organization."
+
+**Test coverage.** A fifth mocked test harness (the same require.cache-
+injection pattern as DOC-70/72/73/74: fake `KnowledgeQuestion`/
+`KnowledgeAnswer`/`User` models plus fake `Notification`/`AuditLog` models
+backing the REAL, unmodified `notification.service.js`/
+`auditLog.service.js`, with the real `knowledge.controller.js` production
+code running against all of them) ran 70 targeted assertions: question
+creation including field-spoofing rejection and validation limits (10),
+list/search/filter/pagination including regex-special-character safety
+(8), answers including cross-org rejection, forged-author rejection, and
+closed-question enforcement (7), accepted-answer permissions including
+cross-org and mismatched-pairing rejection and accepted-answer replacement
+(8), close/reopen lifecycle including the one deliberate
+Manager-moderation Audit Log entry (6), notification dispatch correctness
+including both self-notify guards and a forced-failure resilience check
+(6), a cross-org/mismatched-pairing/XSS/field-spoofing security-attack
+simulation (6), route-level static contract checks (4), and frontend
+static contract checks including verifying the page never uses
+`dangerouslySetInnerHTML` (12). All 70 passed. A separate, clean-process
+regression check confirmed every existing model/controller/route
+(DOC-60/61/64/67/68/69/70/72/73/74) plus every new DOC-75 file load
+together in one shared Node process with no circular dependency and no
+`OverwriteModelError`.
+
+## DOC-76 - User Help & Quick Guides
+
+**Frontend-only. No backend, no database, no Render involvement at all**
+(task spec sections 2/31/32 - "Do NOT require a database unless the audit
+shows a real need... Default: no backend changes"). The read-only audit
+found no existing PDF files, no existing help/guide infrastructure, and no
+security or scale reason to justify a backend for 2-5 short, non-sensitive
+product-usage guides - so this feature is a plain static JS metadata
+module plus two new React pages, nothing in `backend/` was touched, and
+this backend's own server has zero role in serving Help content: guides
+are Vite build-time static assets, served the same way `favicon.ico`
+already is.
+
+**Architecture.** `frontend/src/data/helpGuides.js` exports one
+centralized `HELP_GUIDES` array - the single source of truth, imported by
+both `pages/Help.jsx` (list) and its own guide-detail sub-view (no
+duplicated guide configuration anywhere else, task spec section 19). Each
+entry is `{ id, title, description, allowedRoles, type, steps }` (for
+`type: 'quickGuide'`) or `{ id, title, description, allowedRoles, type,
+file }` (for a future `type: 'pdf'`, once a real file exists under
+`frontend/public/guides/`).
+
+**Two guide types, never confused (task spec section 27).** `'quickGuide'`
+renders real, numbered step content in-app as ordinary React text (never
+`dangerouslySetInnerHTML`) with a blue "Quick Guide" badge.  `'pdf'` would
+open a real static file in a new browser tab (`target="_blank"
+rel="noopener noreferrer"`) with a red "PDF Guide" badge - visually and
+textually distinct so a Quick Guide is never presented as if it were a
+PDF.
+
+**Why both required guides ship as Quick Guides, not PDFs (task spec
+section 26 - CRITICAL).** The audit confirmed there are zero `.pdf` files
+anywhere in this repository. Per the ticket's own explicit instruction,
+no binary PDF was fabricated. Instead, the two required guides (Employee
+"How to Create a Request", Operator "How to Handle a Request") are
+implemented as honestly-labeled `type: 'quickGuide'` entries with real
+step content, grounded in a dedicated audit pass over the actual UI
+(`pages/Dashboard.jsx`, `components/RequestRow.jsx`,
+`components/ManagerRequestRow.jsx`, `components/RequestRatingSection.jsx`)
+rather than invented button names - every quoted UI label in the guide
+text ("Open New Request", "Service Category", "Priority", "Before
+Images", "Start Work", "Mark Resolved", "Resume Work", "Confirm
+Resolved", "Problem Still Exists", "Comments") is copied verbatim from
+that real UI. One important correction the audit surfaced: "Close
+Request" (resolved -> closed) is a **Manager-only** action
+(`ManagerRequestRow.jsx`'s own `canClose`/`onManagerClose`), never an
+Employee action - the Employee's own path to closing a resolved request
+is "Confirm Resolved" - so the Employee guide never mentions "Close
+Request" at all (verified by the test harness below).
+
+**PDF assets still need to be supplied.** No PDF files exist for
+Manager/System Admin guides (or as a replacement for the two Quick
+Guides above) as of this ticket. `helpGuides.js`'s own bottom comment
+documents the exact shape a future PDF-type entry would take once a real
+file is placed at `frontend/public/guides/<file-name>.pdf` (lowercase,
+hyphenated, no spaces, e.g. `manager-manage-users.pdf`) - adding one
+requires zero code redesign, just one more object in `HELP_GUIDES` (or
+changing an existing `quickGuide` entry to `pdf` once its real file
+exists). No phantom Manager/System Admin entries were added to the array
+itself (task spec section 20 - "do not register nonexistent guides");
+that extension path is documented in code comments only.
+
+**Role-based filtering happens in the frontend, not the backend - a
+deliberate, ticket-scoped exception.** Every other feature in this
+project (Chat, Messages, Policies, Knowledge Board) treats the backend as
+the sole authority on visibility. Help has no backend at all to defer to,
+and task spec section 7 explicitly requires "Filter at application logic
+level (`allowedRoles.includes(role)`), never CSS only" - `getGuidesForRole()`
+in `helpGuides.js` does exactly that, and `Help.jsx`'s own guide-detail
+view re-checks role membership again (not just trusting a URL parameter)
+so a role-inaccessible `:guideId` typed directly into the address bar
+still renders a "Guide not found" state, never the content.
+
+**Security honesty note (task spec section 35 - stated explicitly, not
+glossed over).** If a future guide ever ships as a real PDF under
+`frontend/public/guides/`, that file is a static asset in the production
+build output - it is directly reachable by anyone who knows or guesses
+its URL, regardless of the requesting user's role or authentication
+state. Frontend role filtering controls what the **Help Center UI shows
+and links to**; it does **not** provide true file-level access control.
+This is an acceptable tradeoff **only** because Help guides are ordinary,
+non-sensitive product documentation with no privacy requirement - if a
+future guide ever needed genuine role-level file secrecy, it would
+require an authenticated backend download endpoint (the same pattern
+this project already uses for chat/DM attachments and profile images),
+not public static hosting.
+
+**Netlify static-file-priority-over-redirect behavior.** `frontend/public/
+_redirects` contains only the existing SPA catch-all (`/* /index.html
+200`), unchanged by this ticket. Netlify's documented, standard behavior
+serves an actually-existing file in the publish directory directly,
+falling through to `_redirects` rules only when no matching file exists -
+so `/guides/<file>.pdf` would be served as the real file once one is
+added, never swallowed by the SPA catch-all, while `/help` (which has no
+matching static file) still correctly falls through to `index.html` and
+loads the React app. This is standard Netlify behavior, documented here
+for honesty rather than verified against an actual live Netlify
+deployment from this sandboxed environment.
+
+**Navigation.** A compact, circular, icon-only "Help Center" control was
+added to `Navbar.jsx` (visually modeled on `NotificationBell.jsx`'s own
+`.notification-bell-button` shape) rather than a 10th full-width text
+link on an already link-heavy Navbar (task spec: "discoverable but not
+dominant"). Visible to **every** authenticated role, including System
+Admin (unlike Chat/Messages/Policies/Knowledge, which exclude System
+Admin) - task spec never excludes System Admin from opening the Help
+Center itself, only from seeing guide content meant for other roles,
+which `getGuidesForRole()` already handles by returning an empty,
+safely-rendered list. Hidden only during the forced-password-change
+state, the same universal gate "Change Password"'s neighboring links
+already use. Has an `aria-label`, is a real focusable `<a>` (via
+`NavLink`), and has a visible `:focus-visible` keyboard-focus ring
+(reusing the same `--shadow-glow` token every `.btn` in the app already
+uses).
+
+**Routes.** `/help` (guide list) and `/help/:guideId` (guide detail),
+both wrapped in `ProtectedRoute` with **no** `roles` restriction - any
+authenticated role may open the Help Center itself; content is filtered
+inside the page, not the route. An unauthenticated visitor is redirected
+to `/login` by the existing `ProtectedRoute` behavior, unchanged.
+
+**Mobile/responsive.** `.help-card-list` uses the same `auto-fill`
+CSS-grid shape `.knowledge-card-list` (DOC-75) already established, with
+an identical `@media (max-width: 720px)` rule collapsing it to a single
+column - no separate mobile-only component was built. The existing
+`.navbar-links { flex-wrap: wrap; }` rule (unchanged) already reflows the
+Navbar at narrow widths; adding one more compact icon button did not
+require any Navbar CSS restructuring.
+
+**Test coverage.** Since there is no backend controller for this
+frontend-only ticket, the usual require.cache-injection mocked-model
+harness (DOC-68 through DOC-75) does not apply. Instead, a 33-assertion
+harness combined (A) FUNCTIONAL checks - importing the real,
+unmodified `helpGuides.js` module and calling its real
+`getGuidesForRole`/`getGuideById` exports with every role including
+`undefined` and unknown ids, verifying the two required guides exist
+with real step content, verifying no phantom Manager/System Admin
+entries exist, verifying no sensitive terms (JWT/userId/organizationId/
+sessionId/email/password/AWS-secret patterns) appear anywhere in guide
+metadata, and verifying the Employee guide's own "Close Request" audit
+correction - with (B) STATIC SOURCE-CONTRACT checks over the real
+`Help.jsx`/`App.jsx`/`Navbar.jsx`/`index.css` source: no
+`dangerouslySetInnerHTML`, role-array-free route protection on `/help`,
+a mustChangePassword-only (not role-restricted) Navbar gate, an
+accessible label and visible focus state on the Help control, a
+mobile single-column card rule, visually distinct Quick-Guide/PDF-Guide
+badge classes, zero `.pdf` files anywhere under `frontend/public`, an
+unchanged `_redirects` SPA catch-all, and zero new backend files matching
+"help" anywhere under `backend/src`. All 33 passed on the first run. A
+full `npm run build` (92 modules, up from 90 pre-DOC-76) completed
+cleanly both before and after the test pass, and `git status` confirmed
+no DOC-76 work touched anything under `backend/`.
+
+## DOC-77 - Theme Switcher / Appearance Customization
+
+**Frontend-only, no backend/database changes** (task spec section 43 -
+"Theme is client-side appearance preference"). Theme choice never
+travels to this backend, is never stored on the `User` document, and no
+endpoint reads or writes it - it is pure client-side CSS-variable
+switching plus one `localStorage` key.
+
+**Architecture discovered during audit.** `frontend/src/index.css`
+already had a solid `:root` CSS-variable system (`--bg-primary`,
+`--bg-card`, `--color-primary`, `--text-primary`, `--border-color`,
+`--shadow-*`, etc.) - most of the stylesheet already referenced these
+rather than literal colors, which made this a variable-remapping ticket
+rather than a full rewrite. The audit also found a small but important
+class of pre-existing bugs that this ticket fixed as a side effect:
+several rules referenced custom properties that were **never actually
+defined anywhere** (`--color-surface`, `--color-surface-alt`,
+`--color-border`, `--color-text-secondary`, `--color-success`,
+`--color-success-bg`, `--accent-color`, `--surface-muted`), each written
+as `var(--name, <fallback>)` - because the variable never existed, every
+one of those rules silently used its light-colored fallback regardless of
+theme, which is why `.knowledge-card`, `.policy-list-item`, and
+`.knowledge-answer-accepted` already rendered as stray white/pale-green
+cards inside the otherwise all-dark UI even before this ticket existed.
+Defining those variables for real (dark-appropriate in `:root`, the
+existing light-colored fallback preserved as the literal light-theme
+value) fixed that pre-existing bug and made those same rules correctly
+theme-aware, with zero changes needed to the rules themselves.
+
+**Hardcoded-color audit result.** Beyond the phantom-variable bugs above,
+roughly 60 individual property values across `index.css` were literal
+hex/`rgba(...)` colors rather than variables - the large majority were
+`rgba(225, 29, 72, <alpha>)`, the brand red baked directly into hover
+tints, glows, badge backgrounds, and gradients throughout Navbar,
+dashboards, chat, DMs, and forms. Each was classified into one of two
+groups before being touched: **accent-following** values (decorative
+brand touches - hero glow, button gradients, avatar-initials tint, chat
+"own message" bubble, mention highlight, header gradients) were rewritten
+to `rgba(var(--color-primary-rgb), <alpha>)`, so they automatically
+become blue in the light theme; **semantically-red** values (`.btn-danger`,
+`.form-error-server`, `.cancel-confirm-panel`, `.chat-attachment-failed`,
+status-inactive/reopened/overdue badges) were rewritten onto an
+independent `--danger`/`--status-red-*` family that stays red in **both**
+themes (task spec section 15 - critical: destructive/error meaning must
+never silently become "blue" just because blue is now the brand accent).
+A handful of genuinely broken spots were also found and fixed along the
+way: the Notification dropdown panel had a literal near-black background
+(`rgba(24, 24, 27, 0.98)`) that would have been unreadable-on-white in
+light mode; a focused form input's background was hardcoded to `#18181b`
+for the same reason; and the Help Center's own "Quick Guide" badge
+(DOC-76) had a latent bug where its text color read `var(--color-primary,
+#2f6feb)` - since `--color-primary` was always defined (red), that text
+was always red sitting on a blue-tinted background, regardless of theme;
+it now uses a fixed, accent-independent `--status-info-*` pair. A final
+sweep confirmed zero live (non-fallback, non-variable-definition) literal
+colors remain anywhere in the stylesheet. Intentionally-unchanged
+literals: `.modal-overlay`'s black backdrop and two dropdown
+`box-shadow`s (both universal, theme-independent UI conventions, not
+theme bugs), and native `<select>` chrome (a handful of `<select>`
+elements render with default OS styling in both themes - a pre-existing,
+out-of-scope cosmetic limitation, not something this ticket introduced
+or was asked to redesign).
+
+**Theme architecture selected.** `document.documentElement` gets
+`data-theme="dark"` or `data-theme="light"`; `index.css` defines the
+existing dark palette unchanged in `:root` and a full white/blue override
+in a single `[data-theme='light']` block - no duplicated CSS files, no
+per-component theme variants anywhere.
+
+**Files created:** `frontend/src/context/ThemeContext.jsx` (the
+`ThemeProvider`/`useTheme` hook - `theme`/`setTheme`/`toggleTheme`,
+completely independent of `AuthContext.jsx` per task spec section 6).
+
+**Files modified:** `frontend/src/index.css` (the variable/light-theme
+work described above), `frontend/index.html` (a tiny synchronous inline
+flash-prevention script), `frontend/src/App.jsx` (`ThemeProvider` wraps
+`AuthProvider`, not the reverse), `frontend/src/components/Navbar.jsx`
+(Sun/Moon toggle button, rendered in both the authenticated and
+logged-out Navbar states).
+
+**Theme state/context design.** `ThemeContext` owns exactly one piece of
+state and has zero knowledge of `token`/`user`/login/logout - it behaves
+identically whether or not anyone is signed in. `setTheme`/`toggleTheme`
+update React state, persist to `localStorage`, and apply
+`data-theme` to `document.documentElement` in one synchronous effect - no
+page reload is ever required.
+
+**localStorage implementation.** One centralized key, `doc_theme`
+(`ThemeContext.THEME_STORAGE_KEY`), whose only legal values are the
+literal strings `'dark'`/`'light'`. Any other stored value (missing key,
+corrupted value, a value from some future version of this app) safely
+falls back to `'dark'` - existing users are never unexpectedly switched
+to light. Reading and writing are both wrapped in `try/catch` so a
+browser with `localStorage` disabled (private-browsing edge cases)
+degrades to an in-memory-only theme for that session rather than
+crashing. Never stores `userId`/`organizationId`/`role`/a JWT/anything
+else - just the theme name (task spec section 42).
+
+**Initial-load/flash behavior.** `frontend/index.html` has a tiny,
+synchronous, inline `<script>` in `<head>`, before the deferred
+`main.jsx` module script - the only code that runs before first paint.
+It reads `doc_theme` from `localStorage`, applies the exact same
+`'light'`-or-fallback-`'dark'` validation `ThemeContext.jsx` uses, and
+sets `data-theme` immediately - by the time React mounts and
+`ThemeProvider`'s own effect runs, the attribute is already correct, so
+there is no visible flash of the wrong theme. Wrapped in `try/catch` so a
+`localStorage`-disabled browser still renders (falling back to dark)
+instead of breaking startup.
+
+**Navbar toggle implementation.** A single compact icon button (reusing
+the existing `.help-icon-button` circular treatment from DOC-76 - same
+visual language, not a new one) showing a Sun icon while dark is active
+and a Moon icon while light is active, rendered in **both** the
+authenticated and logged-out Navbar branches (task spec section 28 -
+appearance is a device preference, available before login too, unlike
+Help/Notifications which only make sense once authenticated).
+
+**Accessibility behavior.** Real `<button type="button">` (not a
+div/span), keyboard-focusable and clickable with Enter/Space via native
+button semantics, `aria-label` that always describes the action ("Switch
+to light mode" / "Switch to dark mode" - the inverse of the icon shown,
+exactly like a mute button), `aria-pressed` reflecting whether light mode
+is currently active, a `title` tooltip mirroring the same text, and the
+same `:focus-visible` box-shadow ring every other button/icon control in
+this app already uses (`.help-icon-button:focus-visible`) - no new focus
+treatment was invented.
+
+**Dark Theme mapping.** Unchanged from before this ticket - every value
+in `:root` is copied byte-for-byte from the stylesheet's own pre-existing
+dark identity (black/near-black backgrounds, red `#e11d48` accent, white
+text).
+
+**Light Theme mapping.** `--bg-primary: #f4f6fb` (very light gray, not
+pure white, to preserve visual hierarchy per task spec section 12),
+`--bg-card: #ffffff`, `--color-primary: #2563eb` (blue), `--text-primary:
+#0f172a` (dark navy/charcoal), `--border-color: #dde3ec`, softer
+navy-tinted `--shadow-sm`/`--shadow-md` (a heavy black shadow at the
+dark theme's own alpha would look muddy on white).
+
+**Status/destructive color handling.** Five reusable hue families
+(`--status-green-*`/`--status-yellow-*`/`--status-blue-*`/
+`--status-red-*`/`--status-gray-*`, each a bg/border/text triplet) back
+every status/role badge in the app; only the *text* shade changes
+per theme (darker/more saturated in light mode, for contrast against a
+near-white tinted background) - the same status keeps the same hue and
+the same meaning in both themes. `--danger`/`--danger-hover`/
+`--danger-light`/`--danger-rgb` are a fully independent family from
+`--color-primary` - `.btn-danger`, `.cancel-confirm-panel`, and
+`.chat-attachment-failed`'s error state stay red in the light theme even
+though the brand accent there is blue.
+
+**Form/button migration.** `.btn-primary`/`.btn-outline`/`.btn-danger`
+all audited; the one genuine bug found (`.btn-danger` reading the
+accent color instead of an independent danger color) is described above.
+Text inputs/textareas already used `var(--bg-input)`/`var(--border-color)`
+- the only fix needed was the hardcoded `#18181b` focus-state background
+described above. No dedicated `<select>` styling exists for a couple of
+Category/Priority dropdowns elsewhere in the app (pre-existing, renders
+with native OS chrome in both themes - not part of this ticket's scope).
+
+**Navbar migration.** `.navbar`'s own translucent surface
+(`rgba(17, 17, 19, 0.9)`) and every icon-hover "lighten" tint
+(`rgba(255, 255, 255, <alpha>)`) were rewritten onto `--navbar-bg-rgb`/
+`--surface-tint-rgb` bare-RGB-triplet variables, so the light theme gets
+a light, bordered surface and hover tints that darken instead of
+lighten, instead of literally staying black. Active-link underlines and
+focus rings already followed `--color-primary`, so they correctly become
+blue automatically.
+
+**Dashboard coverage.** All four dashboards (Employee/Operator/Manager/
+System Admin) share the same `.card`/`.stat-card`/`.admin-panel`/
+`.status-badge`/`.user-table` building blocks - none of them has its own
+hardcoded color, so fixing those shared classes once covers all four
+simultaneously; no dashboard needed an individual theme pass.
+
+**Request UI coverage.** `RequestRow`/`ManagerRequestRow`/rating
+section/comments/attachments all render through the shared status-badge
+and card/button classes above; `RequestSlaBadge` and the satisfaction
+star rating (`--rating-star-filled`, darkened for contrast in light
+mode) were the two request-specific pieces requiring a change.
+
+**Chat/DM coverage.** Organization Chat's message bubbles (including the
+accent-tinted "own message" bubble), mention highlighting/dropdown,
+attachment cards/thumbnails, and Direct Messages' conversation list/
+active-conversation highlight/unread badge were all audited; the
+Notification-dropdown-style hardcoded-dark-background bug (task spec
+section 37's specific warning) was found and fixed in `.notification-panel`
+- the mention dropdown itself was already fully variable-driven and
+needed no fix.
+
+**Policy/Knowledge coverage.** Both boards reuse the shared
+`.status-badge` family for their own status labels; `.policy-category-badge`/
+`.knowledge-category-badge` and `.knowledge-answer-accepted` were the
+three rules hit by the phantom-variable bug described above, now fixed.
+
+**Profile/Help coverage.** Avatar, bio, Active Sessions/session-history
+rows, and security buttons all already used the shared surface/text
+variables (or the now-newly-defined `--surface-muted`) and needed no
+per-rule changes. Help Center's guide cards/detail view/role labels/
+Quick-Guide badge were audited; the Quick-Guide badge color bug described
+above was the one fix needed there.
+
+**Auth-page coverage.** Login/Register/Forgot Password/Change Password
+all render through the same shared `.card`/`.form-group`/`.btn-*`
+classes as every other page - since `ThemeProvider` wraps the whole app
+above `AuthProvider` (task spec sections 27/28), the saved theme applies
+to these pages identically whether or not the Navbar's own toggle button
+is visible there.
+
+**Hardcoded colors intentionally remaining.** `.modal-overlay`'s
+`rgba(0, 0, 0, 0.65)` backdrop and two dropdown `box-shadow`s using plain
+black - both are universal, theme-independent UI conventions (a dimmed
+backdrop and a drop shadow read as "black-ish" in virtually every
+application regardless of light/dark theme), not theme bugs.
+
+**Responsive behavior.** No changes needed - `.navbar-links { display:
+flex; flex-wrap: wrap; }` (pre-existing) already reflows the Navbar
+(including the two new icon buttons) at narrow widths, confirmed by the
+same `@media (max-width: 640px)` rule every previous ticket's Navbar
+addition already relied on.
+
+**Test count and results.** A 35-assertion harness combining (A)
+FUNCTIONAL checks - `ThemeContext.jsx` transformed from JSX to plain JS
+via `esbuild` (already a Vite devDependency, so no new test framework was
+installed) and its real, unmodified `readStoredTheme`/`isValidTheme`/
+`applyThemeToDocument` exports exercised directly against a faked
+`window.localStorage`/`document`, covering initial-load section 46's
+five cases (no stored value, stored dark, stored light, invalid stored
+value, and a `localStorage`-throwing edge case) plus persistence-shape
+checks - with (B) STATIC SOURCE-CONTRACT checks over `index.html`/
+`App.jsx`/`Navbar.jsx`/`AuthContext.jsx`/`index.css`: flash-prevention
+script ordering and validation-parity with `ThemeContext.jsx`,
+`ThemeProvider` wrapping order, confirmation that `AuthContext.jsx` never
+references theme at all and that `logout()` never calls
+`localStorage.clear()` (task spec section 29), confirmation that
+`localStorage.setItem` calls in `ThemeContext.jsx` only ever write the
+centralized key with no other identifiers, Navbar accessibility/icon-
+communication checks, a CSS variable-parity check (every dark-theme
+variable has either a light-theme override or is on an explicit allowed-
+constant list), and regression guards for every specific bug fixed above
+(`.btn-danger`, `.notification-panel`, `.help-badge-quick-guide`, the
+`#18181b` focus background, the phantom `--color-surface-alt` variable).
+All 35 passed on the first run.
+
+**Functional regression results.** No application behavior changed -
+`ThemeContext` never touches auth, requests, chat, notifications, or any
+other feature's logic; it only ever reads/writes its own `localStorage`
+key and sets one DOM attribute. Confirmed via the static checks above
+(AuthContext untouched, no new backend files, no inline JS logic moved
+into components) rather than re-running every other ticket's own test
+harness, since no file any of them depend on was modified.
+
+**Frontend build result.** `npm run build` - 93 modules (up from 92
+pre-DOC-77), clean, no warnings or errors, both before and after the test
+pass.
+
+**Production/Netlify compatibility.** No environment variables needed, no
+backend changes, no API request is ever made for theme - it is 100%
+client-side `localStorage` + CSS. Works identically after a hard refresh
+(the inline `<head>` script re-reads `localStorage` on every page load,
+independent of any client-side router state) and requires no changes to
+the existing Netlify `_redirects` SPA catch-all.
+
+**Remaining limitations (documented honestly, not silently accepted):**
+a handful of native `<select>` elements (Category/Priority pickers, a
+couple of filter dropdowns) render with default OS chrome rather than
+custom-themed styling in both themes - pre-existing, out of this
+ticket's scope, and not a regression. `.modal-overlay`'s backdrop and two
+dropdown shadows stay black-based in both themes by design (see above).
+Cross-tab sync (task spec section 31, "optional, low-cost") IS
+implemented via a `storage` event listener - changing the theme in one
+tab updates any other open tab immediately.
+
+**Git status summary.** Frontend-only diff: `index.css`, `index.html`,
+`App.jsx`, `Navbar.jsx` modified; `context/ThemeContext.jsx` newly
+created. No file under `backend/` was touched - confirmed by both the
+test harness's own backend-directory scan and a manual `git status`
+check.
+
+**Confirmations:** no backend/database changes of any kind; no
+password/secret/credential was read, written, or changed anywhere in
+this ticket; nothing was committed; nothing was pushed.

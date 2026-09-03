@@ -58,10 +58,31 @@ export function AuthProvider({ children }) {
 
   const register = async (payload) => authApi.register(payload);
 
-  const logout = () => {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-    setToken(null);
-    setUser(null);
+  // DOC-69 - "Login History & Active Sessions" (task spec section 17).
+  // Before this ticket, Logout was 100% local (clear localStorage/state,
+  // nothing else) - the same JWT would otherwise have kept working against
+  // the API for the rest of its natural lifetime if it were ever reused.
+  // Now ALSO revokes the current session server-side first, using the
+  // token that is about to be discarded, so that exact JWT stops being
+  // accepted immediately. Wrapped in try/catch and always falls through to
+  // clearing local state regardless of outcome - a network failure, an
+  // already-expired token, or an already-revoked session (e.g. this same
+  // logout was somehow triggered twice) must never leave the person stuck
+  // mid-logout; local sign-out is unconditional, exactly like before this
+  // ticket (task spec: "Do not break existing Logout UX").
+  const logout = async () => {
+    const currentToken = token;
+    try {
+      if (currentToken) {
+        await authApi.logout(currentToken);
+      }
+    } catch (error) {
+      // Best-effort - see this function's own comment above.
+    } finally {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      setToken(null);
+      setUser(null);
+    }
   };
 
   // DOC-69 - registers the ONE handler services/api.js calls when it

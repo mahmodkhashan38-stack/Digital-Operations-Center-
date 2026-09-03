@@ -11,6 +11,7 @@ import ManagerRequestRow from '../components/ManagerRequestRow.jsx';
 import RequestSearchControls from '../components/RequestSearchControls.jsx';
 import StatBreakdownList from '../components/StatBreakdownList.jsx';
 import AuditLogPanel from '../components/AuditLogPanel.jsx';
+import PasswordResetRequestsPanel from '../components/PasswordResetRequestsPanel.jsx';
 // DOC-69 - PRIORITY_LABELS/STATUS_LABELS now imported from
 // utils/requestLabels.js (one centralized mapping shared with
 // RequestRow.jsx/ManagerRequestRow.jsx/RequestStatusBadge.jsx) instead of
@@ -1227,8 +1228,69 @@ function ManagerDashboard() {
                 </div>
               </div>
             )}
+            <div className="admin-section-header">
+              <h2>Service Satisfaction</h2>
+            </div>
+            {/* DOC-68 - "Employee Satisfaction Rating". Numbers arrive
+                bundled inside this same `stats` response (`stats.satisfaction`
+                - see request.controller.js's getOrganizationRequestStatistics,
+                which folds this in exactly the way DOC-55's own `sla` block
+                was added there) - no separate fetch/loading state needed
+                here, unlike PasswordResetRequestsPanel/AuditLogPanel below.
+                `averageScore` is `null` (never a fake `0`/`0.0`) when no
+                Request has been rated yet - shown as "N/A", the same
+                "N/A rather than fake 0.0" convention this Organization's
+                per-Operator breakdown below also follows. */}
+            <div className="dashboard-stats">
+              <StatCard
+                label="Average Rating"
+                value={stats.satisfaction.averageScore !== null ? `${stats.satisfaction.averageScore.toFixed(2)} / 5` : 'N/A'}
+              />
+              <StatCard label="Total Rated" value={stats.satisfaction.totalRated} />
+            </div>
+            <StatBreakdownList
+              title="Ratings by Star Count"
+              items={stats.satisfaction.distribution.map((entry) => ({ label: `${entry.score} Star${entry.score === 1 ? '' : 's'}`, count: entry.count }))}
+              emptyMessage="No requests have been rated yet."
+            />
+            {stats.satisfaction.byOperator.length === 0 ? (
+              <div className="card admin-panel">
+                <p className="auth-subtitle">No operators currently exist in this organization.</p>
+              </div>
+            ) : (
+              <div className="card admin-panel user-section">
+                <div className="user-table-wrapper">
+                  <table className="user-table">
+                    <thead>
+                      <tr>
+                        <th>Operator</th>
+                        <th>Status</th>
+                        <th>Ratings</th>
+                        <th>Average Rating</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stats.satisfaction.byOperator.map((entry) => (
+                        <tr key={entry.operator.id}>
+                          <td>{entry.operator.fullName}</td>
+                          <td><StatusBadge isActive={entry.operator.isActive} /></td>
+                          <td>{entry.ratingCount}</td>
+                          <td>{entry.averageScore !== null ? `${entry.averageScore.toFixed(2)} / 5` : 'N/A'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </>
         )}
+
+        {/* DOC-70 - "Forgot Password / Password Recovery via Manager
+            Approval". Self-contained panel (owns its own fetch/loading/
+            error/empty state), placed ahead of the Audit Log so a Manager
+            sees pending review items before scrolling to history. */}
+        <PasswordResetRequestsPanel />
 
         {/* DOC-64 - "Audit Log". Manager-only, own Organization - the
             backend (routes/auditLog.routes.js) is the real boundary; this

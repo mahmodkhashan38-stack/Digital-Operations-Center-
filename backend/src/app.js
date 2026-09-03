@@ -9,6 +9,20 @@ const userRoutes = require('./routes/user.routes');
 const serviceCategoryRoutes = require('./routes/serviceCategory.routes');
 const requestRoutes = require('./routes/request.routes');
 const chatRoutes = require('./routes/chat.routes');
+// DOC-73 - "Private Direct Messages" - a separate, participant-private
+// feature, never merged into Organization Chat's own router (see
+// controllers/directMessage.controller.js's own top comment for the full
+// architectural distinction between the two).
+const directMessageRoutes = require('./routes/directMessage.routes');
+// DOC-74 - "Organization Policies & Guidelines" - a separate, per-
+// Organization knowledge/compliance feature (see
+// models/OrganizationPolicy.js's own top comment for why it is a
+// dedicated model/router rather than embedded on Organization).
+const policyRoutes = require('./routes/policy.routes');
+// DOC-75 - "Organization Q&A / Knowledge Board" - persistent, searchable
+// organizational knowledge, deliberately separate from Organization Chat
+// (see controllers/knowledge.controller.js's own top comment).
+const knowledgeRoutes = require('./routes/knowledge.routes');
 const notificationRoutes = require('./routes/notification.routes');
 // DOC-64 - "Audit Log" - a separate, administrative-only collection, never
 // mounted under /api/requests or merged with DOC-17's RequestActivity -
@@ -139,6 +153,20 @@ app.use('/api/requests', requestRoutes);
 // comment for why this is a genuinely separate collection/route, not a
 // reuse of DOC-13's Request Comments system).
 app.use('/api/chat', chatRoutes);
+// DOC-73 - "Private Direct Messages" - participant-private 1:1 messaging,
+// structurally separate from Organization Chat's own org-wide, everyone-
+// can-read model (see controllers/directMessage.controller.js's own top
+// comment).
+app.use('/api/direct-messages', directMessageRoutes);
+// DOC-74 - "Organization Policies & Guidelines" - Manager-managed,
+// same-organization-scoped policy content plus per-user acknowledgement
+// tracking; see routes/policy.routes.js for the full authorization chain.
+app.use('/api/policies', policyRoutes);
+// DOC-75 - "Organization Q&A / Knowledge Board" - persistent, searchable
+// organizational knowledge (ask/answer/accept), structurally separate
+// from Organization Chat's transient/real-time model; see
+// routes/knowledge.routes.js for the full authorization chain.
+app.use('/api/knowledge', knowledgeRoutes);
 // DOC-18 - "In-App Notifications" - a separate, per-recipient inbox, never
 // mounted under /api/requests (a notification is about a Request but is
 // not itself Request-scoped data the way DOC-17's Timeline is - see

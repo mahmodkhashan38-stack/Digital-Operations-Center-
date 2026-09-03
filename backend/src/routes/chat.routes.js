@@ -3,9 +3,18 @@ const verifyToken = require('../middleware/auth');
 const requireRole = require('../middleware/requireRole');
 const requirePasswordChangeCompleted = require('../middleware/requirePasswordChangeCompleted');
 const { requireOrganizationMembership, requireActiveOrganization } = require('../middleware/organizationScope');
-const { listMessages, createMessage } = require('../controllers/chat.controller');
+const { uploadChatAttachments, handleChatUpload, MAX_ATTACHMENTS_PER_MESSAGE } = require('../middleware/chatUpload');
+const { listMessages, createMessage, searchMentionUsers, getChatAttachmentContent } = require('../controllers/chat.controller');
 
 const router = express.Router();
+
+// DOC-70 - "Organization Chat Attachments" (task spec section 13's own
+// recommended shape: "Prefer one atomic message endpoint... This avoids
+// orphaned uploads from a separate upload-first flow."). memoryStorage-
+// backed (middleware/chatUpload.js) - files never touch local disk, and
+// nothing is persisted to GridFS/S3 until chat.controller.js's
+// createMessage explicitly uploads each one.
+const uploadMessageAttachments = handleChatUpload(uploadChatAttachments.array('attachments', MAX_ATTACHMENTS_PER_MESSAGE));
 
 // DOC-60 - "Organization Chat" is reachable by every ACTIVE member of an
 // Organization except System Admin (task spec: "System Admin does not
@@ -58,10 +67,28 @@ router.use(
 
 // GET /api/chat/messages?before=<ISO timestamp>&limit=<1-100>
 router.get('/messages', listMessages);
-// POST /api/chat/messages  Body: { content }
-// No PATCH/DELETE route exists anywhere on this router - messages are
-// immutable in DOC-60 (task spec: "Do not add: PATCH .../:id, DELETE
-// .../:id. Messages are immutable.").
-router.post('/messages', createMessage);
+// POST /api/chat/messages  multipart/form-data: content (optional text),
+// attachments (0-3 files), mentionUserIds (optional JSON array string,
+// DOC-72) - DOC-70 extended this from a plain JSON `{ content }` body to
+// multipart so a single request can carry both text and file(s) (task
+// spec section 13); DOC-72 adds the third field to that same atomic
+// request rather than a separate "attach mentions" call.
+router.post('/messages', uploadMessageAttachments, createMessage);
+// GET /api/chat/mention-users?q=<search text>  (DOC-72) - same-
+// Organization, active, allowed-chat-role user search for the composer's
+// own @mention suggestion dropdown. Registered as a literal `/mention-
+// users` segment - can never collide with the dynamic `/messages/:id/...`
+// routes below regardless of registration order (different literal first
+// segment).
+router.get('/mention-users', searchMentionUsers);
+// GET /api/chat/messages/:messageId/attachments/:attachmentId/content
+// (DOC-70) - authenticated content-proxy, organization-scoped message
+// lookup first (see chat.controller.js's getChatAttachmentContent for the
+// full IDOR-protection writeup). No PATCH/DELETE route exists anywhere on
+// this router - messages (and therefore their attachments) remain
+// immutable in DOC-60/DOC-70 (task spec: "Do not add: PATCH .../:id,
+// DELETE .../:id. Messages are immutable." / DOC-70 section 32: "do not
+// introduce delete just for attachments").
+router.get('/messages/:messageId/attachments/:attachmentId/content', getChatAttachmentContent);
 
 module.exports = router;

@@ -1225,3 +1225,34 @@ built on top of.
   (the backend has no such endpoints - task spec section 36), no Request
   operational data of any kind on the System Admin view (task spec section
   32 - this panel only ever calls `GET /api/audit-logs`).
+
+## DOC-70 - Forgot Password / Password Recovery via Manager Approval
+
+- **`ForgotPassword.jsx`** (new page, public route `/forgot-password`) -
+  email + Company Code form, linked from a new "Forgot Password?" link on
+  `Login.jsx` (placed above the submit button). Submits to
+  `authApi.forgotPassword`, then displays the backend's own safe status
+  message VERBATIM (never a locally-invented one, and never any detail
+  about whether the account actually exists) - the same enumeration-
+  resistance contract the backend documents is deliberately not
+  second-guessed here. No email is ever sent by this project; the copy on
+  this page says so explicitly.
+- **`PasswordResetRequestsPanel.jsx`** (new, self-contained component,
+  same "owns its own fetch/loading/error/empty state" pattern
+  `AuditLogPanel.jsx` already established) - added to `ManagerDashboard.jsx`
+  above the Audit Log panel. Lists every reset request for the Manager's
+  own Organization (backend-enforced, this component never filters
+  client-side to fake that boundary), with a pending count in the header,
+  and per-row Approve/Reject actions only on `pending` rows.
+- **Approve UX reuses `OrganizationUserRow.jsx`'s existing "Reset
+  Password" panel exactly** - the same new-password + confirm-password
+  fields, the same `MIN_PASSWORD_LENGTH`/`MAX_PASSWORD_LENGTH` client-side
+  checks, the same "never redisplay the password after success" behavior.
+  This is intentional: approving a request IS a Manager password reset
+  under the hood, so it looks and behaves like one.
+- **Reject** is a single direct action (no confirm step) - it never
+  changes a password and is not a destructive-adjacent action the way
+  Deactivate User is, so it does not need the same confirm-panel
+  treatment.
+- **Empty state**: "No pending password reset requests." (task spec's own
+  exact wording).

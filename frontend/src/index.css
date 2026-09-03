@@ -1,26 +1,267 @@
+/* ==========================================================================
+   DOC-77 - "Theme Switcher / Appearance Customization".
+
+   THEME ARCHITECTURE: `document.documentElement` gets `data-theme="dark"`
+   or `data-theme="light"` (set by ThemeContext.jsx, read from `localStorage`
+   under the single key `doc_theme` - see that file's own top comment for
+   the full init/persistence contract). This `:root` block IS the Dark
+   Theme (the project's existing, unchanged default identity - task spec
+   section 3: "Preserve the existing Dark Theme as the default") - every
+   value below is copied byte-for-byte from what this block already
+   contained before this ticket. The `[data-theme="light"]` block further
+   down overrides the same variable names with a white/blue identity. NO
+   duplicate CSS files, NO per-component dark/light class variants
+   anywhere in this file (task spec: "Do NOT create duplicated CSS files
+   for every theme... Do NOT hardcode theme logic individually inside
+   dozens of components") - every themed surface in this stylesheet reads
+   one of these variables, and only these variables change between the two
+   `data-theme` blocks.
+
+   AUDIT FINDING (task spec section 1/40 - documented here rather than
+   silently fixed): several rules elsewhere in this file already referenced
+   custom properties that were NEVER DEFINED anywhere - `--color-surface`,
+   `--color-surface-alt`, `--color-border`, `--color-text-secondary`,
+   `--color-success`, `--color-success-bg`, `--accent-color`, and
+   `--surface-muted` - each written as `var(--name, <light-colored
+   fallback>)`. Because the variable itself never existed, CSS always fell
+   through to that literal fallback, regardless of anything else on the
+   page - which is why `.knowledge-card`/`.policy-list-item`/
+   `.knowledge-answer-accepted` already rendered as stray white/pale-green
+   cards floating inside the otherwise all-dark UI even before this ticket
+   (a pre-existing bug, not something this ticket introduced). This block
+   now actually DEFINES every one of those names for the first time -
+   aliased to the real dark-theme tokens below - which simultaneously (a)
+   fixes that pre-existing dark-theme bug and (b) makes those same rules
+   correctly theme-aware going forward, with ZERO changes needed to the
+   component-specific CSS rules that reference them. See the final report
+   for the full list. */
 :root {
   --bg-primary: #0f0f0f;
   --bg-secondary: #1a1a1a;
   --bg-card: #17171a;
   --bg-card-hover: #1e1e22;
   --bg-input: #141416;
+  /* DOC-77 - new: was implicitly `rgba(255, 255, 255, 0.04)` everywhere it
+     was used (an undefined variable's fallback, see the audit note
+     above). Same literal value here, so dark theme's appearance does not
+     change at all - a subtle lightening tint for "muted well" surfaces
+     (attachment thumbnails placeholders, activity-timeline item
+     backgrounds) sitting on a dark card. */
+  --surface-muted: rgba(255, 255, 255, 0.04);
+  /* DOC-77 - new aliases fixing the "phantom variable" bug described
+     above. Dark theme's Policy/Knowledge cards now correctly use the
+     app's real dark card surface instead of an accidental hardcoded
+     white. */
+  --color-surface: var(--bg-card);
+  --color-surface-alt: var(--bg-secondary);
+  --color-border: var(--border-color);
+  --color-text-secondary: var(--text-secondary);
+  /* DOC-77 - new: dark-appropriate success tokens for
+     `.knowledge-answer-accepted` (previously hardcoded to a pale, light-
+     theme-only green (#2f9e44 border / #f1fbf3 background) via the same
+     "undefined variable fallback" bug). */
+  --color-success: #4ade80;
+  --color-success-bg: rgba(34, 197, 94, 0.12);
+  /* DOC-77 - new: `.star-rating-star-button`'s own keyboard-focus outline
+     previously fell back to an unrelated, hardcoded indigo
+     (`rgba(99, 102, 241, ...)`) that matched nothing else in the app.
+     Aliased to the real accent so every focus indicator in the app (this
+     one, `.btn:focus-visible`, `.help-icon-button:focus-visible`) now
+     consistently follows the current theme's accent color. */
+  --accent-color: var(--color-primary);
   --color-primary: #e11d48;
   --color-primary-hover: #be123c;
   --color-primary-light: #fb7185;
+  /* DOC-77 - new: the R,G,B components of --color-primary as a bare
+     triplet, so every existing `rgba(225, 29, 72, <alpha>)` tint/glow/
+     hover-overlay in this file (there were dozens) can be rewritten as
+     `rgba(var(--color-primary-rgb), <alpha>)` - same exact alpha per
+     usage, so dark theme's appearance is pixel-identical, but the hue
+     itself now switches to blue under `[data-theme="light"]`
+     automatically, everywhere, with no per-rule light override needed. */
+  --color-primary-rgb: 225, 29, 72;
+  /* DOC-77 - new: text color placed ON TOP of a solid --color-primary
+     fill (badges, primary buttons). White works on both the dark theme's
+     red and the light theme's blue, so this stays constant - a real
+     variable mainly for readability/documentation, not because its value
+     needs to differ. */
+  --accent-contrast: #ffffff;
+  /* DOC-77 - new, task spec section 15 (CRITICAL): destructive actions
+     (`.btn-danger`) must remain visually destructive in BOTH themes, even
+     though the light theme's primary accent becomes blue. Before this
+     ticket, `.btn-danger` was implemented entirely in terms of
+     `--color-primary`/`--color-primary-light` - harmless only because the
+     dark theme's accent already happened to be red. Decoupled into its
+     own independent token family here so a future accent change can never
+     silently also change what "destructive" looks like. */
+  --danger: #e11d48;
+  --danger-hover: #be123c;
+  --danger-light: #fb7185;
+  --danger-rgb: 225, 29, 72;
+  /* DOC-77 - new: `.hero-card h1`'s (Home page) gradient text-clip
+     effect, previously hardcoded white-to-gray inline in that one rule. */
+  --heading-gradient-start: #ffffff;
+  --heading-gradient-end: #d4d4d8;
+  /* DOC-77 - new: StarRating.jsx's filled-star color, previously a bare
+     hardcoded gold hex with no theme awareness (harmless in dark theme,
+     slightly low-contrast if left unchanged against a white page). */
+  --rating-star-filled: #f5b301;
+  /* DOC-77 - new: the Navbar's own translucent surface (previously a
+     literal `rgba(17, 17, 19, 0.9)`) and dropdown/hover "lighten" tint
+     (previously literal `rgba(255, 255, 255, <alpha>)` in several
+     places - nav-link hover, NotificationBell hover, message-list hover,
+     Help icon hover) as bare RGB triplets so both can flip correctly
+     under the light theme: the Navbar becomes a light, bordered surface
+     instead of black, and hover tints darken instead of lighten. */
+  --navbar-bg-rgb: 17, 17, 19;
+  --surface-tint-rgb: 255, 255, 255;
   --text-primary: #ffffff;
   --text-secondary: #a1a1aa;
   --text-muted: #71717a;
   --border-color: #27272a;
   --border-color-strong: #3f3f46;
+  /* DOC-77 - new: status/role-badge color families (task spec section 14
+     - "status colors may remain semantic in both themes, but ensure
+     contrast is readable in both"). Every `.status-*`/`.status-role-*`/
+     `.status-sla-*`/`.status-password-reset-*` rule in this file
+     previously hardcoded its own bg/border/text hex or rgba values
+     directly (e.g. `color: #86efac`) - those pastel text colors are
+     readable on THIS dark theme's translucent tinted backgrounds, but
+     would be nearly illegible on the light theme's white background
+     (light-on-light). Grouped into five reusable hue families here, each
+     rule below now references these instead of its own literal, and the
+     light theme overrides only the *text* shade to a darker, saturated
+     tone per hue while keeping the same background/border tint family -
+     preserving the same "this badge means open/success/warning/danger/
+     neutral" meaning in both themes. */
+  --status-green-bg: rgba(34, 197, 94, 0.14);
+  --status-green-border: rgba(34, 197, 94, 0.35);
+  --status-green-text: #86efac;
+  --status-yellow-bg: rgba(250, 204, 21, 0.14);
+  --status-yellow-border: rgba(250, 204, 21, 0.35);
+  --status-yellow-text: #fde68a;
+  --status-blue-bg: rgba(96, 165, 250, 0.14);
+  --status-blue-border: rgba(96, 165, 250, 0.35);
+  --status-blue-text: #93c5fd;
+  --status-red-bg: rgba(225, 29, 72, 0.12);
+  --status-red-border: rgba(225, 29, 72, 0.32);
+  --status-red-text: #fb7185;
+  --status-gray-bg: rgba(148, 163, 184, 0.14);
+  --status-gray-border: rgba(148, 163, 184, 0.35);
+  --status-gray-text: #cbd5e1;
+  /* DOC-77 - new: Help Center's "Quick Guide" badge (DOC-76) previously
+     read its text color from `var(--color-primary, #2f6feb)` - since
+     `--color-primary` was always defined (red), that badge's text was
+     ALWAYS red, sitting on a blue-tinted background (`rgba(47, 111, 235,
+     0.12)`) - a pre-existing cosmetic bug, fixed here by giving the
+     "informational/quick" badge family its own fixed identity, completely
+     independent of the theme's accent color (so it stays visually
+     distinct from "PDF Guide" and from primary buttons in both themes). */
+  --status-info-bg: rgba(59, 130, 246, 0.14);
+  --status-info-text: #93c5fd;
   --radius-sm: 8px;
   --radius-md: 14px;
   --radius-lg: 22px;
   --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.45);
   --shadow-md: 0 16px 40px rgba(0, 0, 0, 0.55);
-  --shadow-glow: 0 0 0 3px rgba(225, 29, 72, 0.22);
-  --shadow-glow-strong: 0 10px 30px rgba(225, 29, 72, 0.35);
+  --shadow-glow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.22);
+  --shadow-glow-strong: 0 10px 30px rgba(var(--color-primary-rgb), 0.35);
   --transition: 0.25s ease;
   font-family: 'Segoe UI', system-ui, -apple-system, Roboto, Arial, sans-serif;
+}
+
+/* DOC-77 - Light Theme. Requested identity (task spec section 12/13):
+   white/very-light-gray backgrounds, dark navy/charcoal text, BLUE accent
+   (never red - task spec section 13: "Do NOT hardcode red buttons
+   globally if they should become blue in Light Theme"). Every variable
+   name here already exists in `:root` above - this block only overrides
+   VALUES, it never introduces a variable the dark theme doesn't also
+   have, and no component rule anywhere in this file needs its own
+   `[data-theme="light"] .some-class` override as a result. `--danger`/
+   `--status-*-text` are deliberately NOT overridden to the new blue
+   accent (task spec sections 14/15) - destructive actions and status
+   meaning stay recognizable across both themes. */
+[data-theme='light'] {
+  --bg-primary: #f4f6fb;
+  --bg-secondary: #eef1f6;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f8fafc;
+  --bg-input: #ffffff;
+  --surface-muted: rgba(15, 23, 42, 0.045);
+  --color-surface: #ffffff;
+  --color-surface-alt: #eef1f6;
+  --color-border: #dde3ec;
+  --color-text-secondary: #475569;
+  --color-success: #15803d;
+  --color-success-bg: #f1fbf3;
+  --accent-color: var(--color-primary);
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-light: #3b82f6;
+  --color-primary-rgb: 37, 99, 235;
+  --accent-contrast: #ffffff;
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --danger-light: #ef4444;
+  --danger-rgb: 220, 38, 38;
+  --heading-gradient-start: #0f172a;
+  --heading-gradient-end: #334155;
+  --rating-star-filled: #b45309;
+  --navbar-bg-rgb: 255, 255, 255;
+  --surface-tint-rgb: 15, 23, 42;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --border-color: #dde3ec;
+  --border-color-strong: #cbd5e1;
+  --status-green-bg: rgba(22, 163, 74, 0.12);
+  --status-green-border: rgba(22, 163, 74, 0.35);
+  --status-green-text: #15803d;
+  --status-yellow-bg: rgba(202, 138, 4, 0.12);
+  --status-yellow-border: rgba(202, 138, 4, 0.35);
+  --status-yellow-text: #8a5a06;
+  --status-blue-bg: rgba(37, 99, 235, 0.1);
+  --status-blue-border: rgba(37, 99, 235, 0.35);
+  --status-blue-text: #1d4ed8;
+  --status-red-bg: rgba(220, 38, 38, 0.1);
+  --status-red-border: rgba(220, 38, 38, 0.32);
+  --status-red-text: #b91c1c;
+  --status-gray-bg: rgba(100, 116, 139, 0.14);
+  --status-gray-border: rgba(100, 116, 139, 0.35);
+  --status-gray-text: #475569;
+  --status-info-bg: rgba(37, 99, 235, 0.1);
+  --status-info-text: #1d4ed8;
+  --shadow-sm: 0 2px 10px rgba(15, 23, 42, 0.08);
+  --shadow-md: 0 16px 32px rgba(15, 23, 42, 0.1);
+  --shadow-glow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.22);
+  --shadow-glow-strong: 0 10px 30px rgba(var(--color-primary-rgb), 0.3);
+}
+
+/* DOC-77 - task spec section 33: an optional, deliberately short
+   transition on the three properties that actually change between
+   themes, so switching is a soft cross-fade rather than an instant snap
+   - never applied to layout properties, and skipped entirely for anyone
+   with `prefers-reduced-motion: reduce` set. */
+body,
+.card,
+.navbar,
+.btn,
+.status-badge,
+.form-group input,
+.form-group textarea {
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body,
+  .card,
+  .navbar,
+  .btn,
+  .status-badge,
+  .form-group input,
+  .form-group textarea {
+    transition: none;
+  }
 }
 
 * {
@@ -36,8 +277,8 @@ body,
 
 body {
   background-color: var(--bg-primary);
-  background-image: radial-gradient(circle at 15% 0%, rgba(225, 29, 72, 0.08), transparent 45%),
-    radial-gradient(circle at 85% 15%, rgba(225, 29, 72, 0.05), transparent 40%);
+  background-image: radial-gradient(circle at 15% 0%, rgba(var(--color-primary-rgb), 0.08), transparent 45%),
+    radial-gradient(circle at 85% 15%, rgba(var(--color-primary-rgb), 0.05), transparent 40%);
   background-attachment: fixed;
   color: var(--text-primary);
   line-height: 1.6;
@@ -86,16 +327,16 @@ a {
 @keyframes pulseGlow {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(225, 29, 72, 0.35);
+    box-shadow: 0 0 0 0 rgba(var(--color-primary-rgb), 0.35);
   }
   50% {
-    box-shadow: 0 0 0 8px rgba(225, 29, 72, 0);
+    box-shadow: 0 0 0 8px rgba(var(--color-primary-rgb), 0);
   }
 }
 
 /* ---------- Navbar ---------- */
 .navbar {
-  background-color: rgba(17, 17, 19, 0.9);
+  background-color: rgba(var(--navbar-bg-rgb), 0.9);
   backdrop-filter: blur(10px);
   color: var(--text-primary);
   display: flex;
@@ -134,12 +375,12 @@ a {
   max-width: 140px;
   object-fit: contain;
   background: none;
-  filter: drop-shadow(0 2px 8px rgba(225, 29, 72, 0.35));
+  filter: drop-shadow(0 2px 8px rgba(var(--color-primary-rgb), 0.35));
   transition: filter var(--transition);
 }
 
 .navbar-brand:hover .navbar-logo {
-  filter: drop-shadow(0 2px 14px rgba(225, 29, 72, 0.55));
+  filter: drop-shadow(0 2px 14px rgba(var(--color-primary-rgb), 0.55));
 }
 
 .navbar-links {
@@ -174,7 +415,7 @@ a {
 
 .nav-link:hover {
   color: var(--text-primary);
-  background-color: rgba(255, 255, 255, 0.04);
+  background-color: rgba(var(--surface-tint-rgb), 0.04);
 }
 
 .nav-link:hover::after {
@@ -229,7 +470,7 @@ a {
 
 .notification-bell-button:hover {
   color: var(--text-primary);
-  background-color: rgba(255, 255, 255, 0.06);
+  background-color: rgba(var(--surface-tint-rgb), 0.06);
 }
 
 .notification-badge {
@@ -240,8 +481,8 @@ a {
   height: 1.1rem;
   padding: 0 0.3rem;
   border-radius: 999px;
-  background-color: var(--color-primary, #e11d48);
-  color: #fff;
+  background-color: var(--color-primary);
+  color: var(--accent-contrast);
   font-size: 0.68rem;
   font-weight: 700;
   line-height: 1.1rem;
@@ -257,8 +498,8 @@ a {
   max-height: 420px;
   display: flex;
   flex-direction: column;
-  background-color: rgba(24, 24, 27, 0.98);
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-md, 10px);
   box-shadow: var(--shadow-md, 0 12px 32px rgba(0, 0, 0, 0.4));
   overflow: hidden;
@@ -271,7 +512,7 @@ a {
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.85rem 1rem;
-  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  border-bottom: 1px solid var(--border-color);
 }
 
 .notification-panel-title {
@@ -312,7 +553,7 @@ a {
 .notification-item {
   display: flex;
   align-items: stretch;
-  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+  border-bottom: 1px solid var(--border-color);
 }
 
 .notification-item:last-child {
@@ -320,7 +561,7 @@ a {
 }
 
 .notification-item-unread {
-  background-color: rgba(225, 29, 72, 0.06);
+  background-color: rgba(var(--color-primary-rgb), 0.06);
 }
 
 .notification-item-button {
@@ -338,7 +579,7 @@ a {
 }
 
 .notification-item-button:hover {
-  background-color: rgba(255, 255, 255, 0.04);
+  background-color: rgba(var(--surface-tint-rgb), 0.04);
 }
 
 .notification-item-title {
@@ -450,8 +691,8 @@ a {
 
 .btn-primary {
   background: linear-gradient(135deg, var(--color-primary), var(--color-primary-hover));
-  color: #ffffff;
-  box-shadow: 0 8px 20px rgba(225, 29, 72, 0.28);
+  color: var(--accent-contrast);
+  box-shadow: 0 8px 20px rgba(var(--color-primary-rgb), 0.28);
 }
 
 .btn-primary:hover:not(:disabled) {
@@ -467,7 +708,7 @@ a {
 }
 
 .btn-outline:hover:not(:disabled) {
-  background-color: rgba(225, 29, 72, 0.08);
+  background-color: rgba(var(--color-primary-rgb), 0.08);
   border-color: var(--color-primary);
   color: var(--color-primary-light);
   transform: translateY(-2px);
@@ -477,18 +718,34 @@ a {
   width: 100%;
 }
 
+/* DOC-69 - "Login History & Active Sessions". A smaller button variant for
+   a per-row action (one "Log out" button per session list item) where the
+   default .btn padding would be disproportionately large. */
+.btn-small {
+  padding: 0.4rem 0.9rem;
+  font-size: 0.85rem;
+}
+
 /* ---------- Destructive action (DOC-47) ---------- */
+/* DOC-77 - task spec section 15 (CRITICAL): decoupled from
+   --color-primary/--color-primary-light (the theme's accent, which
+   becomes BLUE in light theme) onto the independent --danger family
+   instead, which stays red in both themes. Before this ticket,
+   `.btn-danger` WAS the primary-accent color - harmless only because the
+   dark theme's own accent already happened to be red; without this
+   change, a Delete/Deactivate/Reject button in the light theme would
+   have silently turned blue and stopped reading as destructive. */
 .btn-danger {
   background-color: transparent;
-  border-color: rgba(225, 29, 72, 0.55);
-  color: var(--color-primary-light);
+  border-color: rgba(var(--danger-rgb), 0.55);
+  color: var(--danger-light);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background-color: var(--color-primary);
-  border-color: var(--color-primary);
-  color: #ffffff;
-  box-shadow: var(--shadow-glow-strong);
+  background-color: var(--danger);
+  border-color: var(--danger);
+  color: var(--accent-contrast);
+  box-shadow: 0 10px 30px rgba(var(--danger-rgb), 0.35);
   transform: translateY(-2px);
 }
 
@@ -563,7 +820,7 @@ a {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: var(--shadow-glow);
-  background-color: #18181b;
+  background-color: var(--bg-input);
 }
 
 /* DOC-61 - Organization Settings form (Manager Dashboard). Reuses the
@@ -677,8 +934,8 @@ a {
   display: inline-block;
   padding: 0.35rem 0.95rem;
   border-radius: 999px;
-  background-color: rgba(225, 29, 72, 0.12);
-  border: 1px solid rgba(225, 29, 72, 0.3);
+  background-color: rgba(var(--color-primary-rgb), 0.12);
+  border: 1px solid rgba(var(--color-primary-rgb), 0.3);
   color: var(--color-primary-light);
   font-size: 0.78rem;
   font-weight: 700;
@@ -691,7 +948,7 @@ a {
   margin: 0 0 1.1rem;
   font-size: 2.75rem;
   line-height: 1.15;
-  background: linear-gradient(135deg, #ffffff, #d4d4d8);
+  background: linear-gradient(135deg, var(--heading-gradient-start), var(--heading-gradient-end));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -733,7 +990,7 @@ a {
   height: 7px;
   border-radius: 50%;
   background-color: var(--color-primary);
-  box-shadow: 0 0 8px rgba(225, 29, 72, 0.6);
+  box-shadow: 0 0 8px rgba(var(--color-primary-rgb), 0.6);
 }
 
 .hero-actions {
@@ -778,7 +1035,7 @@ a {
 
 .feature-card:hover {
   transform: translateY(-6px);
-  border-color: rgba(225, 29, 72, 0.45);
+  border-color: rgba(var(--color-primary-rgb), 0.45);
   box-shadow: var(--shadow-glow-strong);
 }
 
@@ -789,7 +1046,7 @@ a {
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  background: linear-gradient(135deg, rgba(225, 29, 72, 0.22), rgba(225, 29, 72, 0.08));
+  background: linear-gradient(135deg, rgba(var(--color-primary-rgb), 0.22), rgba(var(--color-primary-rgb), 0.08));
   color: var(--color-primary-light);
   font-weight: 700;
   margin-bottom: 0.85rem;
@@ -836,8 +1093,8 @@ a {
 }
 
 .dashboard-welcome {
-  background: linear-gradient(135deg, rgba(225, 29, 72, 0.16), rgba(225, 29, 72, 0.02));
-  border: 1px solid rgba(225, 29, 72, 0.28);
+  background: linear-gradient(135deg, rgba(var(--color-primary-rgb), 0.16), rgba(var(--color-primary-rgb), 0.02));
+  border: 1px solid rgba(var(--color-primary-rgb), 0.28);
   border-radius: var(--radius-lg);
   padding: 2.5rem;
   text-align: center;
@@ -872,7 +1129,7 @@ a {
 
 .stat-card:hover {
   transform: translateY(-4px);
-  border-color: rgba(225, 29, 72, 0.4);
+  border-color: rgba(var(--color-primary-rgb), 0.4);
 }
 
 .stat-label {
@@ -898,10 +1155,16 @@ a {
   justify-content: center;
 }
 
-/* ---------- Form feedback ---------- */
+/* ---------- Form feedback ----------
+   DOC-77 - all three feedback tones now reuse the same --status-* hue
+   families the badges below use (task spec section 14 - status/feedback
+   meaning stays constant, only the exact shade tunes itself per theme for
+   contrast: the dark theme keeps its original pastel-on-tinted-dark
+   look, the light theme uses a darker, more saturated shade of the same
+   hue so text stays readable on a near-white tinted background). */
 .form-error {
   display: block;
-  color: #fb7185;
+  color: var(--status-red-text);
   font-size: 0.85rem;
   margin-top: 0.4rem;
 }
@@ -914,19 +1177,19 @@ a {
 }
 
 .form-error-server {
-  background-color: rgba(225, 29, 72, 0.1);
-  border: 1px solid rgba(225, 29, 72, 0.3);
+  background-color: var(--status-red-bg);
+  border: 1px solid var(--status-red-border);
   border-radius: var(--radius-sm);
   padding: 0.8rem 1rem;
   margin: 0 0 1.35rem;
   text-align: left;
-  color: #ffd7de;
+  color: var(--status-red-text);
 }
 
 .form-success {
-  background-color: rgba(34, 197, 94, 0.1);
-  border: 1px solid rgba(34, 197, 94, 0.3);
-  color: #86efac;
+  background-color: var(--status-green-bg);
+  border: 1px solid var(--status-green-border);
+  color: var(--status-green-text);
   border-radius: var(--radius-sm);
   padding: 0.8rem 1rem;
   margin: 0 0 1.35rem;
@@ -941,9 +1204,9 @@ a {
    an amber/informational tone. */
 .form-warning {
   display: block;
-  background-color: rgba(217, 119, 6, 0.12);
-  border: 1px solid rgba(217, 119, 6, 0.35);
-  color: #fbbf24;
+  background-color: var(--status-yellow-bg);
+  border: 1px solid var(--status-yellow-border);
+  color: var(--status-yellow-text);
   border-radius: var(--radius-sm);
   padding: 0.7rem 0.9rem;
   margin-top: 0.5rem;
@@ -1058,90 +1321,120 @@ a {
 }
 
 .status-active {
-  background-color: rgba(34, 197, 94, 0.14);
-  border: 1px solid rgba(34, 197, 94, 0.35);
-  color: #86efac;
+  background-color: var(--status-green-bg);
+  border: 1px solid var(--status-green-border);
+  color: var(--status-green-text);
 }
 
 .status-inactive {
-  background-color: rgba(225, 29, 72, 0.12);
-  border: 1px solid rgba(225, 29, 72, 0.32);
-  color: var(--color-primary-light);
+  background-color: var(--status-red-bg);
+  border: 1px solid var(--status-red-border);
+  color: var(--status-red-text);
 }
 
 /* DOC-11/46: RequestStatusBadge's status-keyed modifiers, sharing the
    same .status-badge base as the Active/Inactive badge above. */
 .status-request-open {
-  background-color: rgba(96, 165, 250, 0.14);
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  color: #93c5fd;
+  background-color: var(--status-blue-bg);
+  border: 1px solid var(--status-blue-border);
+  color: var(--status-blue-text);
 }
 
 .status-request-in_progress {
-  background-color: rgba(250, 204, 21, 0.14);
-  border: 1px solid rgba(250, 204, 21, 0.35);
-  color: #fde68a;
+  background-color: var(--status-yellow-bg);
+  border: 1px solid var(--status-yellow-border);
+  color: var(--status-yellow-text);
 }
 
 .status-request-resolved,
 .status-request-closed {
-  background-color: rgba(34, 197, 94, 0.14);
-  border: 1px solid rgba(34, 197, 94, 0.35);
-  color: #86efac;
+  background-color: var(--status-green-bg);
+  border: 1px solid var(--status-green-border);
+  color: var(--status-green-text);
 }
 
 .status-request-reopened {
-  background-color: rgba(225, 29, 72, 0.12);
-  border: 1px solid rgba(225, 29, 72, 0.32);
-  color: var(--color-primary-light);
+  background-color: var(--status-red-bg);
+  border: 1px solid var(--status-red-border);
+  color: var(--status-red-text);
 }
 
 /* DOC-46: cancelled is visually distinct from every workflow status above
    (muted gray, not red/blue/green/yellow) - it is a terminal Employee
    decision, not a step in the Operator/Manager workflow. */
 .status-request-cancelled {
-  background-color: rgba(148, 163, 184, 0.14);
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  color: #cbd5e1;
+  background-color: var(--status-gray-bg);
+  border: 1px solid var(--status-gray-border);
+  color: var(--status-gray-text);
 }
 
 /* DOC-55 - "Request SLA and Due Dates". RequestSlaBadge.jsx's badge
    modifiers, sharing the same .status-badge base every other badge in
    this project already uses. */
 .status-sla-on-track {
-  background-color: rgba(34, 197, 94, 0.14);
-  border: 1px solid rgba(34, 197, 94, 0.35);
-  color: #86efac;
+  background-color: var(--status-green-bg);
+  border: 1px solid var(--status-green-border);
+  color: var(--status-green-text);
 }
 
 .status-sla-due-soon {
-  background-color: rgba(250, 204, 21, 0.14);
-  border: 1px solid rgba(250, 204, 21, 0.35);
-  color: #fde68a;
+  background-color: var(--status-yellow-bg);
+  border: 1px solid var(--status-yellow-border);
+  color: var(--status-yellow-text);
 }
 
 .status-sla-overdue {
-  background-color: rgba(225, 29, 72, 0.14);
-  border: 1px solid rgba(225, 29, 72, 0.35);
-  color: var(--color-primary-light);
+  background-color: var(--status-red-bg);
+  border: 1px solid var(--status-red-border);
+  color: var(--status-red-text);
 }
 
 .status-sla-completed-on-time {
-  background-color: rgba(34, 197, 94, 0.14);
-  border: 1px solid rgba(34, 197, 94, 0.35);
-  color: #86efac;
+  background-color: var(--status-green-bg);
+  border: 1px solid var(--status-green-border);
+  color: var(--status-green-text);
 }
 
 .status-sla-completed-late {
-  background-color: rgba(250, 204, 21, 0.14);
-  border: 1px solid rgba(250, 204, 21, 0.35);
-  color: #fde68a;
+  background-color: var(--status-yellow-bg);
+  border: 1px solid var(--status-yellow-border);
+  color: var(--status-yellow-text);
 }
 
 .status-sla-unavailable {
-  background-color: rgba(148, 163, 184, 0.14);
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  color: #cbd5e1;
+  background-color: var(--status-gray-bg);
+  border: 1px solid var(--status-gray-border);
+  color: var(--status-gray-text);
+}
+
+/* DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
+   PasswordResetRequestsPanel's status badge, sharing the same
+   .status-badge base class as every badge above. */
+.status-password-reset-pending {
+  background-color: var(--status-yellow-bg);
+  border: 1px solid var(--status-yellow-border);
+  color: var(--status-yellow-text);
+}
+
+.status-password-reset-approved {
+  background-color: var(--status-green-bg);
+  border: 1px solid var(--status-green-border);
+  color: var(--status-green-text);
+}
+
+.status-password-reset-rejected,
+.status-password-reset-cancelled {
+  background-color: var(--status-gray-bg);
+  border: 1px solid var(--status-gray-border);
+  color: var(--status-gray-text);
+}
+
+/* DOC-70 - Login page's "Forgot Password?" link, placed between the form
+   fields and the submit button. */
+.auth-forgot-password-link {
+  margin: -0.5rem 0 0.75rem;
+  text-align: right;
+  font-size: 0.85rem;
 }
 
 /* Organization Chat's small per-message role badges, sharing the same
@@ -1154,21 +1447,21 @@ a {
 }
 
 .status-role-manager {
-  background-color: rgba(225, 29, 72, 0.12);
-  border: 1px solid rgba(225, 29, 72, 0.32);
-  color: var(--color-primary-light);
+  background-color: var(--status-red-bg);
+  border: 1px solid var(--status-red-border);
+  color: var(--status-red-text);
 }
 
 .status-role-operator {
-  background-color: rgba(96, 165, 250, 0.14);
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  color: #93c5fd;
+  background-color: var(--status-blue-bg);
+  border: 1px solid var(--status-blue-border);
+  color: var(--status-blue-text);
 }
 
 .status-role-employee {
-  background-color: rgba(148, 163, 184, 0.14);
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  color: #cbd5e1;
+  background-color: var(--status-gray-bg);
+  border: 1px solid var(--status-gray-border);
+  color: var(--status-gray-text);
 }
 
 /* DOC-16 - "Request Number / Human-Friendly ID". RequestNumberBadge.jsx's
@@ -1183,8 +1476,8 @@ a {
   margin-right: 0.5rem;
   padding: 0.15rem 0.5rem;
   border-radius: 6px;
-  background-color: rgba(148, 163, 184, 0.14);
-  border: 1px solid rgba(148, 163, 184, 0.3);
+  background-color: var(--status-gray-bg);
+  border: 1px solid var(--status-gray-border);
   color: var(--text-secondary);
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
   font-size: 0.75rem;
@@ -1248,7 +1541,7 @@ a {
 }
 
 .org-code-updated {
-  color: #86efac;
+  color: var(--status-green-text);
   font-size: 0.75rem;
   font-family: 'Segoe UI', system-ui, sans-serif;
   letter-spacing: normal;
@@ -1594,8 +1887,8 @@ a {
   gap: 0.75rem;
   padding: 0.9rem 1rem;
   border-radius: 8px;
-  border: 1px solid rgba(225, 29, 72, 0.35);
-  background: rgba(225, 29, 72, 0.06);
+  border: 1px solid rgba(var(--danger-rgb), 0.35);
+  background: rgba(var(--danger-rgb), 0.06);
 }
 
 /* DOC-15 - "Advanced Request History & Reassignment". Current/New
@@ -1669,6 +1962,153 @@ a {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+/* DOC-68 - "Employee Satisfaction Rating". Mirrors .request-comments's
+   border-top/flex-column pattern for visual consistency with the other
+   sections in RequestRow.jsx's expanded detail panel. */
+.request-rating {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+}
+
+.request-rating-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.request-rating-submitted {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.request-rating-comment {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 0.92rem;
+  color: var(--text-secondary, var(--text-primary));
+}
+
+/* Shared 1-5 star control (StarRating.jsx) - used both as an interactive
+   input (Employee rating form) and a read-only display (submitted rating,
+   Manager's ratings list). The filled/empty distinction is carried by the
+   glyph itself (★ vs ☆), not color alone, so this class only needs to
+   supply size/spacing/color - never the sole way to tell the two states
+   apart. */
+.star-rating {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.star-rating-star {
+  font-size: 1.4rem;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
+.star-rating-star-filled {
+  color: var(--rating-star-filled);
+}
+
+.star-rating-star-button {
+  background: none;
+  border: none;
+  padding: 0.1rem;
+  cursor: pointer;
+}
+
+.star-rating-star-button:focus-visible {
+  outline: 2px solid var(--accent-color, rgba(99, 102, 241, 0.8));
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.star-rating-small .star-rating-star {
+  font-size: 1.05rem;
+}
+
+/* DOC-69 - "Login History & Active Sessions" (Profile.jsx's own
+   ActiveSessionsPanel). Mirrors this project's existing .admin-panel card
+   look; .session-item reuses .comment-item/.timeline-item's own
+   card-inside-a-list visual family for consistency with every other list
+   this app already renders. */
+.session-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+.session-subheading {
+  margin: 0.5rem 0 0;
+  font-size: 1rem;
+}
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.session-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 8px;
+  background: var(--surface-muted, rgba(255, 255, 255, 0.04));
+}
+
+.session-item-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.session-device {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text-primary);
+}
+
+.session-detail {
+  margin: 0.2rem 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.session-ip {
+  font-family: monospace;
+}
+
+.session-logout-all {
+  margin-top: 0.25rem;
+}
+
+/* Recent Login History rows are a flatter, single-line layout - denser
+   than the Active Sessions cards above, since this list can hold up to 30
+   entries (task spec section 13: "Do not overwhelm Profile"). */
+.session-history-list .session-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.9rem;
+}
+
+.session-history-item .session-detail {
+  margin: 0;
 }
 
 /* DOC-17: the Request activity timeline - RequestRow.jsx's expanded
@@ -1800,7 +2240,7 @@ a {
   height: 100px;
   object-fit: cover;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(var(--surface-tint-rgb), 0.05);
 }
 
 .attachment-thumb-broken {
@@ -2151,7 +2591,7 @@ a {
   gap: 1rem;
   padding: 1.5rem 1.75rem;
   border-bottom: 1px solid var(--border-color);
-  background: linear-gradient(135deg, rgba(225, 29, 72, 0.1), rgba(225, 29, 72, 0.02));
+  background: linear-gradient(135deg, rgba(var(--color-primary-rgb), 0.1), rgba(var(--color-primary-rgb), 0.02));
 }
 
 .chat-header-title {
@@ -2327,8 +2767,8 @@ a {
    color, rather than a second unrelated color. */
 .chat-message-own {
   align-self: flex-end;
-  background: linear-gradient(135deg, rgba(225, 29, 72, 0.18), rgba(225, 29, 72, 0.08));
-  border-color: rgba(225, 29, 72, 0.32);
+  background: linear-gradient(135deg, rgba(var(--color-primary-rgb), 0.18), rgba(var(--color-primary-rgb), 0.08));
+  border-color: rgba(var(--color-primary-rgb), 0.32);
 }
 
 .chat-message-header {
@@ -2376,7 +2816,7 @@ a {
   gap: 0.4rem;
   padding: 0.5rem 1.1rem;
   background: linear-gradient(135deg, var(--color-primary), var(--color-primary-hover));
-  color: #ffffff;
+  color: var(--accent-contrast);
   border: none;
   border-radius: 999px;
   font-size: 0.8rem;
@@ -2454,4 +2894,1063 @@ a {
 .chat-char-counter-over {
   color: var(--color-primary-light);
   font-weight: 700;
+}
+
+/* DOC-71 - "Enhanced User Profile: Profile Picture + Bio". Avatar.jsx's
+   own circular image/initials-fallback element. Three fixed sizes cover
+   every place this component is used (Profile.jsx's large header avatar,
+   a possible future Navbar-sized avatar, and a small in-list avatar for
+   Chat-readiness - see Avatar.jsx's own "CHAT-READINESS" comment) without
+   needing an arbitrary numeric size prop. */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  object-fit: cover;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.avatar-small {
+  width: 32px;
+  height: 32px;
+  font-size: 0.75rem;
+}
+
+.avatar-medium {
+  width: 48px;
+  height: 48px;
+  font-size: 1rem;
+}
+
+.avatar-large {
+  width: 96px;
+  height: 96px;
+  font-size: 1.75rem;
+}
+
+.avatar-initials {
+  color: var(--text-secondary);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background-color: rgba(var(--color-primary-rgb), 0.12);
+  border-color: rgba(var(--color-primary-rgb), 0.35);
+}
+
+/* Profile.jsx's own "Photo" section - the avatar plus its Upload/Remove
+   controls, sitting above the existing Full Name/Email form. */
+.profile-photo-section {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  margin-bottom: 1.75rem;
+  flex-wrap: wrap;
+}
+
+.profile-photo-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.profile-photo-buttons {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.profile-photo-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* Bio textarea - reuses .form-group's existing input/textarea styling;
+   only adds the small right-aligned remaining-character counter beneath
+   it (task spec's own 250-character limit). */
+.profile-bio-counter {
+  display: block;
+  margin-top: 0.35rem;
+  text-align: right;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.profile-bio-counter-over {
+  color: var(--color-primary-light);
+  font-weight: 700;
+}
+
+/* DOC-70 - "Organization Chat Attachments". */
+.chat-attach-btn {
+  flex-shrink: 0;
+  padding: 0.7rem 0.9rem;
+  font-size: 0.85rem;
+}
+
+.chat-selected-attachments {
+  margin-bottom: 0.6rem;
+}
+
+.chat-selected-attachment-preview {
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.chat-selected-attachment-icon {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+}
+
+/* Attachments render below a message's text content, inside the same
+   bubble (task spec section 23) - column layout so multiple attachments
+   stack cleanly under one another. */
+.chat-message-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.chat-attachment-image-link {
+  display: inline-block;
+}
+
+.chat-attachment-image {
+  max-width: 220px;
+  max-height: 220px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: block;
+}
+
+.chat-attachment-image-placeholder {
+  display: block;
+  width: 160px;
+  height: 120px;
+  border-radius: 8px;
+  background: rgba(var(--surface-tint-rgb), 0.05);
+}
+
+/* Task spec section 28 - "If image cannot load: show 'Unable to load
+   attachment' with filename. Do not show broken-image browser icon
+   only." */
+.chat-attachment-failed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  background: rgba(var(--danger-rgb), 0.08);
+  border: 1px solid rgba(var(--danger-rgb), 0.25);
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  max-width: 220px;
+}
+
+.chat-attachment-failed-name {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+/* PDF/plain-text file card (task spec section 23: "PDF icon, filename,
+   size, Open / Download"). */
+.chat-attachment-card {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(var(--surface-tint-rgb), 0.04);
+  border: 1px solid var(--border-color);
+  max-width: 280px;
+}
+
+.chat-attachment-card-icon {
+  font-size: 1.4rem;
+  flex-shrink: 0;
+}
+
+.chat-attachment-card-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-attachment-card-name {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.chat-attachment-card-size {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.chat-attachment-card-error {
+  margin-left: 0.5rem;
+}
+
+/* DOC-72 - "@Mentions in Organization Chat". */
+
+/* Visually-distinct inline mention token inside a message's rendered text
+   (task spec section 18: "Mention text should be visually distinct"),
+   produced by OrganizationChat.jsx's own safe tokenizer
+   (renderContentWithMentions) - never raw HTML. */
+.chat-mention {
+  color: var(--color-primary-light);
+  background: rgba(var(--color-primary-rgb), 0.12);
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+  font-weight: 600;
+}
+
+/* Wraps just the composer textarea so the suggestion dropdown below can be
+   positioned relative to it without disturbing the Attach button/Send
+   button's own flex layout in .chat-composer-row. */
+.chat-mention-input-wrapper {
+  position: relative;
+  flex: 1;
+  display: flex;
+}
+
+.chat-mention-dropdown {
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 20;
+  list-style: none;
+  margin: 0;
+  padding: 0.3rem;
+}
+
+.chat-mention-dropdown-empty {
+  padding: 0.5rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.chat-mention-option {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-mention-option-active,
+.chat-mention-option:hover {
+  background-color: rgba(var(--color-primary-rgb), 0.14);
+}
+
+/* Initials-only "avatar" (task spec section 24 - avoid fetching an
+   authenticated profile image per suggestion per keystroke; see
+   OrganizationChat.jsx's own comment on this decision). Reuses the same
+   circular initials treatment as .avatar-initials at a smaller fixed
+   size, without depending on Avatar.jsx itself. */
+.chat-mention-option-initials {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background-color: rgba(var(--color-primary-rgb), 0.12);
+  border: 1px solid rgba(var(--color-primary-rgb), 0.35);
+}
+
+.chat-mention-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* DOC-73 - "Private Direct Messages". Nudges the shared .notification-badge
+   dot to sit at the corner of the "Messages" text link rather than a
+   circular icon button (its only other use so far, NotificationBell.jsx) -
+   the badge's own color/shape/sizing is fully reused unchanged. */
+.messages-nav-badge {
+  top: 0.1rem;
+  right: -0.35rem;
+}
+
+/* ---------- /messages two-pane layout ---------- */
+.messages-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.messages-shell {
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  flex: 1;
+  min-height: 480px;
+  display: flex;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+
+.messages-sidebar {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-color);
+  min-height: 0;
+}
+
+.messages-sidebar-header {
+  flex-shrink: 0;
+  padding: 1.25rem 1.25rem 1rem;
+  border-bottom: 1px solid var(--border-color);
+  background: linear-gradient(135deg, rgba(var(--color-primary-rgb), 0.1), rgba(var(--color-primary-rgb), 0.02));
+}
+
+.messages-sidebar-title {
+  margin: 0 0 0.75rem;
+  font-size: 1.15rem;
+  color: var(--text-primary);
+}
+
+.messages-search-wrap {
+  position: relative;
+}
+
+.messages-search-input {
+  width: 100%;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 0.55rem 0.8rem;
+  font-size: 0.85rem;
+}
+
+.messages-search-input:focus-visible {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-glow);
+}
+
+.messages-search-dropdown {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 20;
+  list-style: none;
+  margin: 0;
+  padding: 0.3rem;
+}
+
+.messages-search-empty {
+  padding: 0.5rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.messages-search-result {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.messages-search-result:hover:not(:disabled) {
+  background-color: rgba(var(--color-primary-rgb), 0.14);
+}
+
+.messages-search-result-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.messages-search-dropdown-close {
+  padding: 0.3rem 0.4rem 0.1rem;
+  text-align: right;
+}
+
+.messages-conversation-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.messages-conversation-items {
+  list-style: none;
+  margin: 0;
+  padding: 0.4rem;
+}
+
+.messages-conversation-item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  padding: 0.65rem 0.7rem;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  margin-bottom: 0.15rem;
+}
+
+.messages-conversation-item:hover {
+  background-color: rgba(var(--surface-tint-rgb), 0.04);
+}
+
+.messages-conversation-item-active {
+  background: linear-gradient(135deg, rgba(var(--color-primary-rgb), 0.18), rgba(var(--color-primary-rgb), 0.08));
+}
+
+.messages-conversation-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.messages-conversation-top-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.messages-conversation-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.messages-conversation-time {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.messages-conversation-bottom-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.messages-conversation-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.messages-unread-badge {
+  flex-shrink: 0;
+  min-width: 1.1rem;
+  height: 1.1rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background-color: var(--color-primary);
+  color: var(--accent-contrast);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.1rem;
+  text-align: center;
+}
+
+.messages-conversation-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.messages-conversation-pane .empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  border-radius: 0;
+}
+
+.messages-conversation-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+  background: linear-gradient(135deg, rgba(var(--color-primary-rgb), 0.1), rgba(var(--color-primary-rgb), 0.02));
+}
+
+.messages-back-btn {
+  display: none;
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 50%;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.messages-conversation-header-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.messages-conversation-header-name {
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--text-primary);
+}
+
+/* Mobile: exactly one pane visible at a time (task spec section 32 -
+   "Conversation list -> tap conversation -> conversation view. Provide
+   back button to list. Do not require desktop width."). Above this
+   breakpoint both panes always render side by side regardless of
+   `mobilePane` state - see Messages.jsx's own comment. */
+@media (max-width: 720px) {
+  .messages-shell {
+    max-width: 100%;
+  }
+
+  .messages-sidebar {
+    width: 100%;
+    border-right: none;
+  }
+
+  .messages-mobile-list .messages-conversation-pane {
+    display: none;
+  }
+
+  .messages-mobile-conversation .messages-sidebar {
+    display: none;
+  }
+
+  .messages-back-btn {
+    display: inline-flex;
+  }
+}
+
+/* DOC-74 - "Organization Policies & Guidelines". Employee/Operator read
+   view: a two-pane layout (policy list + detail), the same general shape
+   Messages.jsx's own `.messages-shell` already established, reused here
+   at a smaller scale since a policy list/detail pair is much lighter than
+   a full chat UI. The Manager management view (rendered by the same
+   Policies.jsx component - see that file's own top comment) instead
+   reuses the existing `.user-table`/`.admin-panel`/`.card` classes
+   directly, no new table styling needed. */
+.policy-page {
+  max-width: 1100px;
+}
+
+.policy-category-badge {
+  background: var(--color-surface-alt, #eef1f6);
+  color: var(--color-text-secondary, #475569);
+}
+
+.policy-shell {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.policy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.policy-list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  text-align: left;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border, #dde3ec);
+  border-radius: 0.5rem;
+  background: var(--color-surface, #fff);
+  cursor: pointer;
+}
+
+.policy-list-item-active {
+  border-color: var(--color-primary, #2f6feb);
+  box-shadow: 0 0 0 1px var(--color-primary, #2f6feb);
+}
+
+.policy-list-item-title {
+  font-weight: 600;
+}
+
+.policy-list-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.policy-detail-wrapper {
+  min-height: 200px;
+}
+
+.policy-detail-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.policy-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/* CRITICAL - preserves the author's own line breaks (task spec: "Preserve
+   line breaks safely") without ever injecting HTML - this element only
+   ever receives plain React text ({detail.content}), never
+   dangerouslySetInnerHTML. */
+.policy-detail-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  margin-bottom: 1.5rem;
+}
+
+.policy-acknowledge-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.policy-editor-panel,
+.policy-ack-panel {
+  margin-top: 1.5rem;
+}
+
+.policy-editor-form textarea {
+  font-family: inherit;
+  resize: vertical;
+}
+
+.policy-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.policy-manager-table td {
+  vertical-align: top;
+}
+
+.policy-ack-summary {
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 720px) {
+  .policy-shell {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* DOC-75 - "Organization Q&A / Knowledge Board". A card-grid list view
+   (never a two-pane layout the way Messages.jsx/Policies.jsx use - a
+   Knowledge Board is browsed more like a search-results page than a
+   conversation list) plus a single-column detail view reached by
+   selecting a card - the exact "one shared page, role-aware inline
+   controls" pattern this project's other DOC-73/74 pages already
+   establish, reused here at a different visual shape suited to browsing
+   many short cards. */
+.knowledge-page {
+  max-width: 1100px;
+}
+
+.knowledge-category-badge {
+  background: var(--color-surface-alt, #eef1f6);
+  color: var(--color-text-secondary, #475569);
+}
+
+.knowledge-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin: 1rem 0 1.25rem;
+}
+
+.knowledge-search-form {
+  display: flex;
+  gap: 0.5rem;
+  flex: 1 1 240px;
+}
+
+.knowledge-search-form input {
+  flex: 1;
+}
+
+.knowledge-filters select {
+  min-width: 140px;
+}
+
+.knowledge-card-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.knowledge-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  text-align: left;
+  padding: 1rem;
+  border: 1px solid var(--color-border, #dde3ec);
+  border-radius: 0.5rem;
+  background: var(--color-surface, #fff);
+  cursor: pointer;
+}
+
+.knowledge-card:hover {
+  border-color: var(--color-primary, #2f6feb);
+}
+
+.knowledge-card-title {
+  font-weight: 600;
+}
+
+.knowledge-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.knowledge-card-footer {
+  margin-top: auto;
+}
+
+.knowledge-pagination {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  justify-content: center;
+  margin-top: 1.5rem;
+}
+
+.knowledge-back-btn {
+  margin-bottom: 1rem;
+}
+
+.knowledge-detail-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.knowledge-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/* CRITICAL - preserves the author's own line breaks without ever
+   injecting HTML - this element only ever receives plain React text
+   ({detail.content}/{answer.content}), never dangerouslySetInnerHTML. */
+.knowledge-detail-content,
+.knowledge-answer-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+}
+
+.knowledge-detail-content {
+  margin-bottom: 1.25rem;
+}
+
+.knowledge-moderation-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.knowledge-editor-panel {
+  margin: 1.25rem 0;
+}
+
+.knowledge-answers-section {
+  margin-top: 2rem;
+}
+
+.knowledge-answer-list {
+  list-style: none;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.knowledge-answer-item {
+  border: 1px solid var(--color-border, #dde3ec);
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.knowledge-answer-accepted {
+  border-color: var(--color-success, #2f9e44);
+  background: var(--color-success-bg, #f1fbf3);
+}
+
+.knowledge-answer-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.knowledge-answer-author {
+  font-weight: 600;
+}
+
+.knowledge-accepted-badge {
+  margin-left: auto;
+}
+
+.knowledge-answer-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.knowledge-answer-edit-form textarea {
+  width: 100%;
+  font-family: inherit;
+}
+
+.knowledge-answer-form textarea {
+  font-family: inherit;
+  resize: vertical;
+}
+
+.knowledge-closed-notice {
+  font-style: italic;
+}
+
+@media (max-width: 720px) {
+  .knowledge-card-list {
+    grid-template-columns: 1fr;
+  }
+
+  .knowledge-filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* DOC-76 - "User Help & Quick Guides".
+   .help-icon-button deliberately mirrors .notification-bell-button above
+   (same 2.4rem circular hit target, same "none" background, same hover
+   tint) so the new Help control reads as a sibling of the existing
+   Navbar icon controls rather than a visually distinct addition. Uses a
+   real <a> (NavLink) rather than a <button> since it is pure navigation,
+   with the same keyboard-focus treatment .btn:focus-visible already
+   gives every button in the app (task spec: "visible focus state"). */
+.help-icon-button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-decoration: none;
+  transition: color var(--transition), background-color var(--transition);
+}
+
+.help-icon-button svg {
+  width: 1.35rem;
+  height: 1.35rem;
+}
+
+.help-icon-button:hover {
+  color: var(--text-primary);
+  background-color: rgba(var(--surface-tint-rgb), 0.06);
+}
+
+.help-icon-button:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-glow);
+}
+
+/* Help Center page - list view. Same auto-fill card-grid shape as
+   .knowledge-card-list above (task spec: "cards stack vertically on
+   mobile" - handled by the identical mobile media query below), reused
+   rather than duplicated since the layout need is the same. */
+.help-card-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.help-guide-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.help-guide-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.help-guide-card-header h2,
+.help-guide-card-header h1 {
+  margin: 0;
+}
+
+.help-guide-role-label {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* Distinct badge colors so "Quick Guide" is never visually mistaken for
+   a "PDF Guide" (task spec section 27 - "must be clearly distinguished,
+   never presented as if it were a PDF Guide") - both still share the
+   base .status-badge look every other badge in the app uses.
+   DOC-77 - fixed a pre-existing bug: `.help-badge-quick-guide`'s text
+   color previously read `var(--color-primary, #2f6feb)` - since
+   `--color-primary` was always defined (red in the dark theme), that
+   badge's text was ALWAYS red, sitting on a blue-tinted background,
+   regardless of theme. Now uses the fixed, theme-independent
+   `--status-info-*` pair instead (task spec section 13's "quick/info"
+   identity is deliberately NOT the same thing as the theme's own accent
+   color, so it never collides with primary buttons in the light theme). */
+.help-badge-quick-guide {
+  background-color: var(--status-info-bg);
+  color: var(--status-info-text);
+}
+
+.help-badge-pdf {
+  background-color: rgba(var(--danger-rgb), 0.12);
+  color: var(--danger);
+}
+
+/* Help Center - guide detail view (/help/:guideId). */
+.help-guide-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 640px;
+}
+
+.help-guide-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding-left: 1.25rem;
+  margin: 0;
+}
+
+.help-back-link {
+  display: inline-block;
+  margin-bottom: 1rem;
+  color: var(--color-primary, #2f6feb);
+  text-decoration: none;
+}
+
+.help-back-link:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 720px) {
+  .help-card-list {
+    grid-template-columns: 1fr;
+  }
 }
