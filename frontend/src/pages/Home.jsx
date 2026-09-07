@@ -1,6 +1,9 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import logoMark from '../assets/logo-mark.png';
+// Logo Replacement task - see components/Navbar.jsx's own import comment
+// for the full rationale (new DOC wordmark, transparent background, same
+// .hero-logo CSS unchanged since it already sizes via object-fit: contain).
+import logoMark from '../assets/doc-logo.png';
 
 // How the request lifecycle flows through the system.
 const STEPS = [

@@ -1,5 +1,12 @@
 import { NavLink, useNavigate } from 'react-router-dom';
-import logoMark from '../assets/logo-mark.png';
+// Logo Replacement task - new DOC wordmark (gear-in-D / connectivity-in-O /
+// checkmark-in-C), transparent background so it renders cleanly against
+// both Dark and Light theme Navbar backgrounds (see index.css .navbar-logo
+// - unchanged, already uses object-fit: contain + height-constrained
+// sizing, so no CSS changes were needed for the new artwork's aspect
+// ratio). Filename kept plain/canonical per task spec section 3 ("no
+// random generated filenames").
+import logoMark from '../assets/doc-logo.png';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useTheme } from '../context/ThemeContext.jsx';
 import { DASHBOARD_ROUTE_BY_ROLE } from '../utils/roleRoutes.js';
