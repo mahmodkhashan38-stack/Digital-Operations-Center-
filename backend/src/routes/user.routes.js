@@ -142,18 +142,19 @@ router.patch('/:id/status', updateUserStatus);
 // updateUserSpecialties in user.controller.js for the complete
 // validation/isolation rules.
 router.patch('/:id/specialties', updateUserSpecialties);
-// DOC-57 - Flow B, "Manager Password Reset". Sprint 7 - "SMS + Phone
-// Authentication Upgrade" REWROTE this endpoint's own behavior (see
-// resetUserPassword/performPasswordReset in user.controller.js): the
-// Manager no longer supplies a password at all - a secure temporary
-// password is generated server-side and sent by SMS to the target's own
-// verified phone. Route/middleware chain unchanged.
+// DOC-57 - Flow B, "Manager Password Reset". The DOC Email Authentication
+// & Notification Upgrade (originally Sprint 7) REWROTE this endpoint's own
+// behavior (see resetUserPassword/performPasswordReset in
+// user.controller.js): the Manager no longer supplies a password at all -
+// a secure temporary password is generated server-side and emailed to the
+// target's own verified email address. Route/middleware chain unchanged.
 router.patch('/:id/reset-password', resetUserPassword);
 
 // DOC-70's three /password-reset-requests* routes (Manager-approval
-// Forgot Password review queue) have been REMOVED by Sprint 7 - "SMS +
-// Phone Authentication Upgrade" - see models/PasswordResetRequest.js's
-// own retirement notice. Forgot Password is now fully self-service
-// (POST /api/auth/forgot-password) with no Manager review step.
+// Forgot Password review queue) have been REMOVED by the DOC Email
+// Authentication & Notification Upgrade (originally Sprint 7) - see
+// models/PasswordResetRequest.js's own retirement notice. Forgot Password
+// is now fully self-service (POST /api/auth/forgot-password) with no
+// Manager review step.
 
 module.exports = router;

@@ -5,25 +5,23 @@ import { authApi } from '../services/api.js';
 import { EMAIL_REGEX } from '../utils/validation.js';
 import getApiErrorMessage from '../utils/apiError.js';
 
-// Sprint 7 - "SMS + Phone Authentication Upgrade" replaced DOC-70's
+// DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE replaced DOC-70's
 // Manager-approval recovery flow entirely (see auth.controller.js's
-// forgotPassword - completely rewritten, not extended). This project still
-// has no email delivery (no SMTP, no third-party provider, no reset links)
-// - recovery is now self-service via SMS instead of being routed through
-// an Organization Manager: if the account exists, is active, and has a
-// VERIFIED phone number, the backend generates a secure temporary
-// password, texts it to that phone, and forces a permanent-password change
-// on next login (see ChangePassword.jsx). This page still only ever
-// submits { email, companyCode } to the backend (authApi.forgotPassword)
-// and shows whatever safe, generic status message the backend returns - it
-// never learns (and must never guess) whether the account actually exists,
-// is active, has a verified phone, or whether the SMS actually delivered;
-// the backend's own response text is displayed verbatim (see
-// auth.controller.js's forgotPassword for the full, now-even-stricter
-// enumeration-resistance contract - Sprint 7 collapsed what used to be two
-// distinct DOC-70 messages, "deactivated" vs "already pending", into one
-// single identical response for every possible outcome, including genuine
-// success - this page deliberately does not second-guess any of that).
+// forgotPassword) - and, before that, the retired Sprint 7 SMS-delivery
+// mechanism (see git history). Recovery is fully self-service, with NO
+// Manager approval: if the account exists, is active, and has a VERIFIED
+// email address, the backend generates a secure temporary password,
+// emails it to that address (the one already on file - this page never
+// lets the person choose an alternate destination), and forces a
+// permanent-password change on next login (see ChangePassword.jsx). This
+// page still only ever submits { email, companyCode } to the backend
+// (authApi.forgotPassword) and shows whatever safe, generic status
+// message the backend returns - it never learns (and must never guess)
+// whether the account actually exists, is active, has a verified email,
+// or whether the email actually delivered; the backend's own response
+// text is displayed verbatim (see auth.controller.js's forgotPassword for
+// the full enumeration-resistance contract - a single identical response
+// covers every possible outcome, including genuine success).
 const COMPANY_CODE_REGEX = /^[A-Za-z0-9]{6}$/;
 
 function ForgotPassword() {
@@ -101,7 +99,7 @@ function ForgotPassword() {
       // tone as GENERIC_FORGOT_PASSWORD_MESSAGE in auth.controller.js.
       setSuccessMessage(
         response.message
-          || 'If an account matches those details and has a verified phone number, a temporary password has been sent by SMS.',
+          || 'If an account matches those details and has a verified email address, a temporary password has been sent to it.',
       );
       setFormData({ email: '', companyCode: '' });
     } catch (error) {
@@ -121,8 +119,9 @@ function ForgotPassword() {
       <div className="card auth-card">
         <h1>Forgot Password</h1>
         <p className="auth-subtitle">
-          Enter your email and your organization&apos;s Company Code. If your account has a verified phone number,
-          we&apos;ll text you a temporary password - no email will be sent, and no Manager approval is needed.
+          Enter your email and your organization&apos;s Company Code. If the account is eligible, a temporary
+          password will be sent to your registered email - no Manager approval is needed. Sign in with the
+          temporary password and you will be required to choose a new one.
         </p>
 
         {serverError && <p className="form-error form-error-server">{serverError}</p>}

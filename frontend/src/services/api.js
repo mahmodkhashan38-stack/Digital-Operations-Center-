@@ -137,21 +137,22 @@ export const authApi = {
   // requirePasswordChangeCompleted.js - this route never has that
   // middleware composed into its chain at all).
   changePassword: (payload, token) => request('/auth/change-password', { method: 'PATCH', body: payload, token }),
-  // Sprint 7 - "SMS + Phone Authentication Upgrade". REPLACES DOC-70's
+  // DOC Email Authentication & Notification Upgrade - REPLACES DOC-70's
   // Manager-approval flow - PUBLIC, no token, same shape as register/login
   // above. `payload` is always exactly { email, companyCode } (never a
-  // destination phone - the backend only ever sends to the account's own
-  // already-verified number). The response is always the same safe,
+  // destination address - the backend only ever sends to the account's own
+  // already-verified email on file). The response is always the same safe,
   // generic status message regardless of outcome (see backend's
   // forgotPassword for the full enumeration-resistance contract) - never
   // a token or account data.
   forgotPassword: (payload) => request('/auth/forgot-password', { method: 'POST', body: payload }),
-  // Sprint 7 - phone verification (task spec Phase 4/9). PUBLIC - the
-  // account cannot authenticate yet at this point. `userId` comes from
-  // `register`'s own 201 response. `code` is the 6-digit OTP the user
-  // just received by SMS.
-  verifyPhone: (payload) => request('/auth/verify-phone', { method: 'POST', body: payload }),
-  resendPhoneOtp: (payload) => request('/auth/resend-phone-otp', { method: 'POST', body: payload }),
+  // DOC Email Authentication & Notification Upgrade - email verification
+  // (task spec Phase 4/9, replaces the retired Sprint 7 phone OTP flow).
+  // PUBLIC - the account cannot authenticate yet at this point. `userId`
+  // comes from `register`'s own 201 response. `code` is the 6-digit OTP
+  // the user just received by email.
+  verifyEmail: (payload) => request('/auth/verify-email', { method: 'POST', body: payload }),
+  resendEmailOtp: (payload) => request('/auth/resend-email-otp', { method: 'POST', body: payload }),
   // DOC-69 - "Login History & Active Sessions". Revokes the CURRENT
   // server-side session before AuthContext.jsx clears the local token -
   // see that file's own `logout` for why this is wrapped in a try/catch
@@ -313,21 +314,22 @@ export const userApi = {
   // entirely from the scoped :id lookup and rejects anything that isn't
   // currently an Operator in the caller's own Organization.
   updateSpecialties: (id, categoryIds, token) => request(`/users/${id}/specialties`, { method: 'PATCH', body: { categoryIds }, token }),
-  // DOC-57 - Flow B, "Manager Password Reset". Sprint 7 - "SMS + Phone
-  // Authentication Upgrade" REWROTE this endpoint's own behavior: no body
+  // DOC-57 - Flow B, "Manager Password Reset". DOC Email Authentication &
+  // Notification Upgrade REWROTE this endpoint's own behavior: no body
   // is sent anymore - the Manager never chooses, sends, or sees a
   // password at all. The backend generates a secure temporary password
-  // and sends it by SMS directly to the target's own verified phone; this
-  // call simply triggers that. Only usable on an Employee or Operator in
-  // the Manager's own Organization (never self, another Manager, or
+  // and sends it by email directly to the target's own verified address;
+  // this call simply triggers that. Only usable on an Employee or Operator
+  // in the Manager's own Organization (never self, another Manager, or
   // System Admin) - the backend is the sole authority on that.
   resetPassword: (id, token) => request(`/users/${id}/reset-password`, { method: 'PATCH', token }),
   // DOC-70's listPasswordResetRequests/approvePasswordResetRequest/
   // rejectPasswordResetRequest calls (Manager-approval Forgot Password
-  // review queue) have been REMOVED by Sprint 7 - "SMS + Phone
-  // Authentication Upgrade". Forgot Password is now fully self-service
-  // (authApi.forgotPassword above) with no Manager review step - see
-  // backend/src/models/PasswordResetRequest.js's own retirement notice.
+  // review queue) have been REMOVED by the DOC Email Authentication &
+  // Notification Upgrade (originally by Sprint 7). Forgot Password is now
+  // fully self-service (authApi.forgotPassword above) with no Manager
+  // review step - see backend/src/models/PasswordResetRequest.js's own
+  // retirement notice.
 };
 
 // Service Category management API calls (DOC-43). Manager-only on the

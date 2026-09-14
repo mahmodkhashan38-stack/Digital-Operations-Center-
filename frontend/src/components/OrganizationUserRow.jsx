@@ -74,26 +74,26 @@ function OrganizationUserRow({
   const [specialtiesError, setSpecialtiesError] = useState('');
   const [specialtiesPending, setSpecialtiesPending] = useState(false);
 
-  // DOC-57 - "Manager Password Reset", redesigned by Sprint 7 - "SMS +
-  // Phone Authentication Upgrade" (task spec Phase 12). `onResetPassword`
-  // is only ever passed by ManagerDashboard.jsx for rows in the
-  // Employees/Operators sections (task spec: "Only Manager sees it" / "Do
-  // not show Reset Password for: manager rows, system_admin, the Manager
-  // themselves") - this component structurally never renders a Manager's
-  // or System Admin's own row at all (see ManagerDashboard.jsx's
-  // UserRoleSection, which only ever builds Employee/Operator groups), so
-  // no additional role guard is needed here beyond the same "only render
-  // the control if the prop was actually passed" pattern every other
-  // action on this row already uses.
+  // DOC-57 - "Manager Password Reset", redesigned by the DOC Email
+  // Authentication & Notification Upgrade (originally Sprint 7, task spec
+  // Phase 12). `onResetPassword` is only ever passed by
+  // ManagerDashboard.jsx for rows in the Employees/Operators sections (task
+  // spec: "Only Manager sees it" / "Do not show Reset Password for: manager
+  // rows, system_admin, the Manager themselves") - this component
+  // structurally never renders a Manager's or System Admin's own row at
+  // all (see ManagerDashboard.jsx's UserRoleSection, which only ever
+  // builds Employee/Operator groups), so no additional role guard is
+  // needed here beyond the same "only render the control if the prop was
+  // actually passed" pattern every other action on this row already uses.
   //
-  // Sprint 7 removed the Manager's ability to type/see a new password
+  // This upgrade removed the Manager's ability to type/see a new password
   // entirely (task spec: "Prefer sending a system-generated temporary
-  // password directly to user's verified phone... do not let Manager
+  // password directly to user's verified email... do not let Manager
   // know/send plaintext password") - there is no longer a form here, only
   // a confirm/cancel step exactly like the Deactivate confirm panel above
   // (`showDeactivateConfirm`), since triggering this now takes no input at
-  // all: the backend generates the temporary password and SMS's it to the
-  // target user's own verified phone (user.controller.js's
+  // all: the backend generates the temporary password and emails it to the
+  // target user's own verified address (user.controller.js's
   // performPasswordReset).
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetPending, setResetPending] = useState(false);
@@ -242,11 +242,11 @@ function OrganizationUserRow({
     setResetSuccessMessage('');
   };
 
-  // Sprint 7 - no form fields to validate or submit anymore; confirming
-  // this action takes no input at all. `onResetPassword` (ManagerDashboard.
-  // jsx's handleResetPassword) calls PATCH /api/users/:id/reset-password
-  // with no body, which tells the backend to generate a temporary password
-  // and SMS it directly to the target user's own verified phone - this
+  // No form fields to validate or submit anymore; confirming this action
+  // takes no input at all. `onResetPassword` (ManagerDashboard.jsx's
+  // handleResetPassword) calls PATCH /api/users/:id/reset-password with no
+  // body, which tells the backend to generate a temporary password and
+  // email it directly to the target user's own verified address - this
   // component never sees, types, or displays that password at any point.
   const handleConfirmReset = async () => {
     setResetError('');
@@ -254,10 +254,10 @@ function OrganizationUserRow({
     setResetPending(true);
     try {
       await onResetPassword(user);
-      setResetSuccessMessage('A temporary password has been sent to this user by SMS. They must set a new password at their next login.');
+      setResetSuccessMessage('A temporary password has been sent to this user by email. They must set a new password at their next login.');
     } catch (err) {
-      // Failed (most commonly: this user has no verified phone number yet,
-      // or the SMS provider failed to deliver) - the backend's own
+      // Failed (most commonly: this user has not verified their email yet,
+      // or the email provider failed to deliver) - the backend's own
       // client-safe error message is shown inline; the confirm panel stays
       // open so the Manager can simply try again.
       setResetError(err.message);
@@ -380,9 +380,9 @@ function OrganizationUserRow({
             ) : (
               <>
                 <p>
-                  A secure, system-generated temporary password will be sent by SMS to this user&apos;s verified phone
-                  number. You will not see or choose this password - the user must set a new permanent password the
-                  next time they log in.
+                  A secure, system-generated temporary password will be sent by email to this user&apos;s verified
+                  email address. You will not see or choose this password - the user must set a new permanent
+                  password the next time they log in.
                 </p>
                 {resetError && <p className="form-error form-error-server">{resetError}</p>}
                 <div className="form-actions form-actions-row">

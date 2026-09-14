@@ -172,14 +172,22 @@ const run = async () => {
     passwordHash,
     role: 'system_admin',
     organizationId: null,
-    // Sprint 7 - "SMS + Phone Authentication Upgrade". System Admin never
-    // collects a phone number (see models/User.js's own schema comment) -
-    // explicit here rather than relying solely on the schema default
-    // ('pending') plus the login gate's own system_admin exemption
-    // (controllers/auth.controller.js's `login`), so this account's own
-    // stored state is honest on its own terms, not just "happens to never
-    // be checked".
-    phoneVerificationStatus: 'not_required',
+    // DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE. System Admin is
+    // treated as already-trusted/verified (see models/User.js's own
+    // schema comment) - explicit here rather than relying solely on the
+    // schema default ('pending') plus the login gate's own system_admin
+    // exemption (controllers/auth.controller.js's `login`), so this
+    // account's own stored state is honest on its own terms, not just
+    // "happens to never be checked". A pre-existing System Admin created
+    // before this field existed simply has no value for it yet - see this
+    // file's own "already bootstrapped" branch above, which never
+    // touches an existing admin document at all; if that document
+    // predates this field, resetTenantData.js's own read-only
+    // assertExactlyOneSystemAdmin() check does not depend on this field's
+    // value, and the login gate's system_admin exemption is unconditional
+    // (checked by role, never by this field), so an existing System Admin
+    // is never locked out regardless of what this field currently holds.
+    emailVerificationStatus: 'not_required',
   });
 
   console.log('System Admin created successfully:');

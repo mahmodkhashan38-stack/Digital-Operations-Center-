@@ -6,15 +6,15 @@ const Request = require('../models/Request');
 const {
   sanitizeUser, EMAIL_REGEX, SALT_ROUNDS, validatePassword,
 } = require('./auth.controller');
-// Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec Phase 12 -
-// "REMOVE MANAGER RESET UX" - "Prefer sending a system-generated
-// temporary password directly to user's verified phone. Manager should
-// not... know/see the plaintext password."). Replaces DOC-70's
-// PasswordResetRequest import above (retired - see that model's own
-// header notice) with the same temp-password/SMS primitives
+// DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE - "MANAGER RESET
+// PASSWORD" ("Manager does NOT choose the password... sends it directly
+// to target user's verified email... Manager never sees plaintext").
+// Replaces DOC-70's PasswordResetRequest import above (retired - see that
+// model's own header notice) and the retired Sprint 7 SMS delivery (see
+// git history) with the same temp-password/email primitives
 // controllers/auth.controller.js's forgotPassword already uses.
 const { generateTempPassword } = require('../utils/tempPassword');
-const { sendSms } = require('../services/sms.service');
+const { sendEmail } = require('../services/email.service');
 // DOC-64 - "Audit Log". Every Manager account-management action below
 // (role change, deactivate/reactivate, password reset, specialties) and
 // the self-service Profile update at the bottom of this file record one
@@ -925,55 +925,57 @@ const updateUserSpecialties = async (req, res, next) => {
 // be forced through the change-password flow at their very next login,
 // exactly like an active target would be immediately. Reset never
 // auto-reactivates the account - `isActive` is never touched here.
-// Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec Phase 12 -
-// "REMOVE MANAGER RESET UX"). REWRITTEN from DOC-57's original shape: the
-// Manager no longer supplies (or ever sees) `newPassword`/
-// `confirmPassword` at all - this now generates a secure temporary
-// password SERVER-SIDE, exactly like controllers/auth.controller.js's
-// `forgotPassword`, and delivers it ONLY by SMS to the target's own
-// verified phone. "Do not let Manager know/send plaintext password" is
-// satisfied structurally: the plaintext value never leaves this function
-// (never returned, never logged, never audit-logged - see the recordAuditLog
-// call below, whose `metadata` is unchanged from before this rewrite).
+// DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE - "MANAGER RESET
+// PASSWORD". REWRITTEN from DOC-57's original shape (unchanged in spirit
+// from the retired Sprint 7 SMS version - see git history, only the
+// delivery channel changed): the Manager no longer supplies (or ever
+// sees) `newPassword`/`confirmPassword` at all - this generates a secure
+// temporary password SERVER-SIDE, exactly like controllers/
+// auth.controller.js's `forgotPassword`, and delivers it ONLY by EMAIL to
+// the target's own verified email address. "Manager never sees the
+// plaintext password" is satisfied structurally: the plaintext value
+// never leaves this function (never returned, never logged, never
+// audit-logged - see the recordAuditLog call below, whose `metadata` is
+// unchanged from before this rewrite).
 //
-// SECURITY-CRITICAL SMS FAILURE (task spec Phase 5): if the target has no
-// verified phone, or the SMS cannot be sent, this function returns
-// `{ error }` and the target's password is left completely untouched -
-// the same "do not create a temporary password the user cannot receive"
-// contract `forgotPassword` already follows. Returns `{}` on success
-// (targetUser has already been mutated AND saved, sessions revoked, and
-// the audit log entry already recorded) - it never sends an HTTP response
-// itself.
+// SECURITY-CRITICAL EMAIL FAILURE: if the target has no verified email,
+// or the email cannot be sent, this function returns `{ error }` and the
+// target's password is left completely untouched - the same "do not
+// create a temporary password the user cannot receive" contract
+// `forgotPassword` already follows. Returns `{}` on success (targetUser
+// has already been mutated AND saved, sessions revoked, and the audit log
+// entry already recorded) - it never sends an HTTP response itself.
 async function performPasswordReset({ req, targetUser }) {
-  if (targetUser.phoneVerificationStatus !== 'verified' || !targetUser.phoneNumber) {
+  if (targetUser.emailVerificationStatus !== 'verified') {
     return {
       error: {
         status: 400,
-        message: 'This user has no verified phone number on file, so a temporary password cannot be sent.',
+        message: 'This user has not verified their email yet, so a temporary password cannot be sent.',
       },
     };
   }
 
   const tempPassword = generateTempPassword();
-  const smsResult = await sendSms({
-    to: targetUser.phoneNumber,
-    message: `DOC: Your temporary password is ${tempPassword}. Sign in and change it immediately. Do not share this password.`,
+  const emailResult = await sendEmail({
+    to: targetUser.email,
+    subject: 'DOC Password Reset',
+    text: `A password reset was requested for your DOC account.\n\nTemporary password:\n${tempPassword}\n\nSign in using this temporary password. You will be required to choose a new password immediately.\n\nIf you did not request this reset, contact your organization administrator.`,
     type: 'PASSWORD_RESET_TEMP_PASSWORD',
     recipientUserId: targetUser._id,
     organizationId: targetUser.organizationId,
   });
-  if (!smsResult.success) {
+  if (!emailResult.success) {
     return {
       error: {
         status: 502,
-        message: 'Unable to send a temporary password to this user\'s phone right now. Please try again shortly.',
+        message: 'Unable to send a temporary password to this user\'s email right now. Please try again shortly.',
       },
     };
   }
 
   // The Manager never sees, chooses a hint for, or otherwise learns the
   // new password - it exists only in this function's own local variable
-  // and the SMS body already sent above; this never reads or compares
+  // and the email body already sent above; this never reads or compares
   // against the OLD password either (unlike self-change, there is no
   // "current password" concept here, by design).
   targetUser.passwordHash = await bcrypt.hash(tempPassword, SALT_ROUNDS);

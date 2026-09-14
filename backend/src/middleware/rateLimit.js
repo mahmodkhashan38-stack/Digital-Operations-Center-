@@ -1,6 +1,9 @@
 /**
- * Sprint 7 - "SMS + Phone Authentication Upgrade" - Phase 8, "PASSWORD
- * RESET RATE LIMITING" / "SMS COST ABUSE".
+ * "PASSWORD RESET RATE LIMITING" / "EMAIL ABUSE PREVENTION" (originally
+ * built for the now-retired Sprint 7 "SMS COST ABUSE" rate limiting - see
+ * git history - this module itself needed no changes for the DOC Email
+ * Authentication & Notification Upgrade, only the callers' key
+ * builders/budgets did).
  * -------------------------------------------------------------------------
  *
  * WHY A SIMPLE IN-MEMORY LIMITER, NOT REDIS
@@ -10,15 +13,16 @@
  * Redis (or any other external store) for rate limiting alone would be
  * exactly the kind of "heavy new dependency for one feature" this
  * project's own established conventions avoid (see, e.g., services/
- * sms.service.js's own choice to call Twilio's REST API directly rather
- * than add its SDK). A plain in-memory sliding-window counter, keyed by a
+ * email.service.js's own choice to call Brevo's REST API directly rather
+ * than add an SDK). A plain in-memory sliding-window counter, keyed by a
  * caller-supplied string, is sufficient for this project's actual
  * deployment shape (a single Node process - see backend/src/server.js,
  * no cluster/multi-instance mode anywhere in this codebase) and is
  * documented here as a KNOWN, ACCEPTED LIMITATION for a future
  * multi-instance deployment (each instance would enforce its own
  * independent limit rather than a shared one - see backend/README.md's
- * own Sprint 7 section for the same note).
+ * own Email Authentication & Notification Upgrade section for the same
+ * note).
  *
  * USAGE
  *   const { rateLimit } = require('../middleware/rateLimit');
@@ -52,7 +56,7 @@ function sweepExpired(now) {
  * budget is exhausted for the remainder of the current window. Exported
  * directly (not just as Express middleware) so services that are not
  * themselves an Express route handler - e.g. services/
- * phoneVerification.service.js's own resend cooldown, if it ever needs a
+ * emailVerification.service.js's own resend cooldown, if it ever needs a
  * non-HTTP check - can reuse the exact same counting logic.
  */
 function checkAndRecord(key, { windowMs, max }) {

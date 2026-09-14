@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { authApi } from '../services/api.js';
-import { EMAIL_REGEX, PHONE_REGEX } from '../utils/validation.js';
+import { EMAIL_REGEX } from '../utils/validation.js';
 import getApiErrorMessage from '../utils/apiError.js';
 
 // Mirrors the backend's Company Code format (DOC-41): 6 letters/digits.
@@ -17,36 +17,34 @@ const COMPANY_CODE_REGEX = /^[A-Za-z0-9]{6}$/;
 // the backend is the sole authority on what code is actually accepted.
 const OTP_LENGTH = 6;
 
-// Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec Phase 9
-// "REGISTRATION UPDATE" + "OTP VERIFICATION FLOW"). Registration is now a
-// two-step page rather than a single form:
+// DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE ("REGISTRATION UPDATE" +
+// "OTP VERIFICATION FLOW"). Registration is a two-step page:
 //
-//   STEP 'form' - the same fullName/email/password/companyCode fields as
-//     before, PLUS a new required phoneNumber field. Submitting calls the
-//     already-existing authApi.register unchanged in shape except for the
-//     added phoneNumber - the backend creates the real User document
-//     immediately (phoneVerificationStatus: 'pending') and sends a 6-digit
-//     OTP to that phone by SMS (services/phoneVerification.service.js).
-//     The account CANNOT sign in yet - see auth.controller.js's login()
-//     phone-verification gate - so this page does not redirect to /login
-//     the moment the account is created; it advances to the OTP step
-//     instead.
+//   STEP 'form' - fullName/email/password/companyCode only - the retired
+//     Sprint 7 phoneNumber field has been removed entirely (see git
+//     history). Submitting calls authApi.register - the backend creates
+//     the real User document immediately (emailVerificationStatus:
+//     'pending') and sends a 6-digit OTP to that email
+//     (services/emailVerification.service.js). The account CANNOT sign
+//     in yet - see auth.controller.js's login() email-verification gate -
+//     so this page does not redirect to /login the moment the account is
+//     created; it advances to the OTP step instead.
 //   STEP 'verify' - the person enters the 6-digit code they received by
-//     SMS. This calls the new public POST /api/auth/verify-phone endpoint
-//     (authApi.verifyPhone) with { userId, code } - `userId` is simply
+//     email. This calls the public POST /api/auth/verify-email endpoint
+//     (authApi.verifyEmail) with { userId, code } - `userId` is simply
 //     `data.id` from the register response above, never anything the user
-//     types. A "Resend code" action (authApi.resendPhoneOtp) is available
-//     for the case where the SMS is slow, undelivered, or the original
-//     code (10-minute expiry, see phoneVerification.service.js) has
+//     types. A "Resend code" action (authApi.resendEmailOtp) is available
+//     for the case where the email is slow, undelivered, or the original
+//     code (10-minute expiry, see emailVerification.service.js) has
 //     lapsed. Only after verification succeeds does this page send the
-//     person to /login - there is still no auto-login here, exactly like
-//     the pre-Sprint-7 flow: verifying a phone number is not the same
-//     event as authenticating, and the account's password was already
-//     collected and hashed in the STEP 'form' request above.
+//     person to /login - there is still no auto-login here: verifying an
+//     email is not the same event as authenticating, and the account's
+//     password was already collected and hashed in the STEP 'form'
+//     request above.
 //
-// Neither step ever stores the phone number, password, or OTP code
-// anywhere but this component's own in-memory React state - nothing is
-// written to localStorage/sessionStorage (see this project's established
+// Neither step ever stores the password or OTP code anywhere but this
+// component's own in-memory React state - nothing is written to
+// localStorage/sessionStorage (see this project's established
 // browser-storage restriction), and both are discarded the instant this
 // component unmounts (e.g. navigating away).
 function Register() {
@@ -61,7 +59,6 @@ function Register() {
     email: '',
     password: '',
     confirmPassword: '',
-    phoneNumber: '',
     companyCode: '',
   });
   const [errors, setErrors] = useState({});
@@ -111,14 +108,6 @@ function Register() {
       nextErrors.confirmPassword = 'Passwords do not match.';
     }
 
-    // Sprint 7 - required for every new account (task spec Phase 9): the
-    // account cannot sign in at all until this number is verified.
-    if (!formData.phoneNumber.trim()) {
-      nextErrors.phoneNumber = 'Phone number is required.';
-    } else if (!PHONE_REGEX.test(formData.phoneNumber.trim())) {
-      nextErrors.phoneNumber = 'Please enter a valid phone number.';
-    }
-
     if (!formData.companyCode.trim()) {
       nextErrors.companyCode = 'Company code is required.';
     } else if (!COMPANY_CODE_REGEX.test(formData.companyCode.trim())) {
@@ -144,7 +133,6 @@ function Register() {
         fullName: formData.fullName.trim(),
         email: formData.email.trim(),
         password: formData.password,
-        phoneNumber: formData.phoneNumber.trim(),
         companyCode: formData.companyCode.trim(),
       });
       // The password is cleared the instant it is no longer needed - the
@@ -176,8 +164,8 @@ function Register() {
 
     setIsVerifying(true);
     try {
-      await authApi.verifyPhone({ userId: registeredUserId, code: otpCode.trim() });
-      navigate('/login', { state: { phoneVerified: true } });
+      await authApi.verifyEmail({ userId: registeredUserId, code: otpCode.trim() });
+      navigate('/login', { state: { emailVerified: true } });
     } catch (error) {
       setOtpServerError(getApiErrorMessage(error, 'Verification failed. Please check the code and try again.'));
     } finally {
@@ -190,8 +178,8 @@ function Register() {
     setResendMessage('');
     setIsResending(true);
     try {
-      await authApi.resendPhoneOtp({ userId: registeredUserId });
-      setResendMessage('A new code has been sent to your phone.');
+      await authApi.resendEmailOtp({ userId: registeredUserId });
+      setResendMessage('A new code has been sent to your email.');
     } catch (error) {
       setOtpServerError(getApiErrorMessage(error, 'Could not resend the code. Please try again shortly.'));
     } finally {
@@ -203,10 +191,10 @@ function Register() {
     return (
       <section className="page auth-page">
         <div className="card auth-card">
-          <h1>Verify Your Phone</h1>
+          <h1>Verify Your Email</h1>
           <p className="auth-subtitle">
-            We sent a {OTP_LENGTH}-digit verification code by SMS to the phone number you entered. Enter it below to
-            finish creating your account. You will not be able to sign in until your phone is verified.
+            We sent a verification code to your email address. Enter it below to
+            finish creating your account. You will not be able to sign in until your email is verified.
           </p>
 
           {otpServerError && <p className="form-error form-error-server">{otpServerError}</p>}
@@ -239,7 +227,7 @@ function Register() {
 
             <div className="form-actions">
               <button type="submit" className="btn btn-primary btn-block" disabled={isVerifying}>
-                {isVerifying ? 'Verifying...' : 'Verify Phone'}
+                {isVerifying ? 'Verifying...' : 'Verify Email'}
               </button>
               <button
                 type="button"
@@ -351,29 +339,6 @@ function Register() {
               />
             </div>
             {errors.confirmPassword && <span className="form-error">{errors.confirmPassword}</span>}
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="phoneNumber">Phone Number</label>
-            <div className="input-group">
-              <span className="input-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="6" y="2" width="12" height="20" rx="2" />
-                  <path d="M11 18h2" />
-                </svg>
-              </span>
-              <input
-                id="phoneNumber"
-                name="phoneNumber"
-                type="tel"
-                autoComplete="tel"
-                placeholder="+972501234567"
-                value={formData.phoneNumber}
-                onChange={handleChange}
-              />
-            </div>
-            <span className="form-hint">We'll text you a verification code - you must verify this number before you can sign in.</span>
-            {errors.phoneNumber && <span className="form-error">{errors.phoneNumber}</span>}
           </div>
 
           <div className="form-group">

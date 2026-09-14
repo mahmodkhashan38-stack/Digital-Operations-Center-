@@ -12,13 +12,13 @@ import { MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH } from '../utils/validation.js
 //      at any time, regardless of `user.mustChangePassword`.
 //   2. Involuntarily, redirected here by ProtectedRoute.jsx whenever
 //      `user.mustChangePassword === true` - this same page is also where
-//      that state gets cleared, via a successful submission here. Sprint 7
-//      - "SMS + Phone Authentication Upgrade" - widened WHO can cause
-//      this: previously only a Manager's emergency reset (DOC-57 Flow B)
-//      set `mustChangePassword`, now the self-service SMS Forgot Password
-//      flow (auth.controller.js's forgotPassword) does too, and it is by
-//      far the more common path now that Manager approval has been
-//      removed entirely from password recovery.
+//      that state gets cleared, via a successful submission here. Widened
+//      WHO can cause this: previously only a Manager's emergency reset
+//      (DOC-57 Flow B) set `mustChangePassword`, now the self-service
+//      email-based Forgot Password flow (auth.controller.js's
+//      forgotPassword) does too, and it is by far the more common path
+//      now that Manager approval has been removed entirely from password
+//      recovery.
 // Either way this is the exact same form/component - there is no second,
 // "forced" variant of this page. The backend (PATCH
 // /api/auth/change-password, always reachable regardless of
@@ -26,14 +26,14 @@ import { MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH } from '../utils/validation.js
 // remains the sole authority on whether a submission actually succeeds;
 // this page's own validation is only for fast, friendly feedback.
 //
-// Sprint 7 UX note: the field itself is still named/submitted as
-// `currentPassword` in every case (the backend's contract is unchanged -
-// it always compares against whatever hash is currently stored, whether
-// that hash came from the person's own last chosen password or from an
-// SMS-delivered temporary one) - only the on-screen LABEL/placeholder
-// changes when `user.mustChangePassword` is true, so a person who just
-// received a temporary password by text is not confused into looking for
-// a password they never set.
+// UX note: the field itself is still named/submitted as `currentPassword`
+// in every case (the backend's contract is unchanged - it always compares
+// against whatever hash is currently stored, whether that hash came from
+// the person's own last chosen password or from an emailed temporary one)
+// - only the on-screen LABEL/placeholder changes when
+// `user.mustChangePassword` is true, so a person who just received a
+// temporary password by email is not confused into looking for a
+// password they never set.
 function ChangePassword() {
   const navigate = useNavigate();
   const { user, token, updateUser } = useAuth();
@@ -135,7 +135,7 @@ function ChangePassword() {
         <h1>Change Password</h1>
         <p className="auth-subtitle">
           {user?.mustChangePassword
-            ? 'Enter the temporary password we sent you by SMS, then choose a new permanent password to continue.'
+            ? 'Enter the temporary password we emailed you, then choose a new permanent password to continue.'
             : 'Update the password for your account.'}
         </p>
 
