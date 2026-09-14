@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import StatusBadge from './StatusBadge.jsx';
-import { EMAIL_REGEX, MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH } from '../utils/validation.js';
+import { EMAIL_REGEX } from '../utils/validation.js';
 
 // A single Employee or Operator row inside the Manager Dashboard's user
 // table. `actionRole` is the ONE role this row's Promote/Demote button may
@@ -74,19 +74,28 @@ function OrganizationUserRow({
   const [specialtiesError, setSpecialtiesError] = useState('');
   const [specialtiesPending, setSpecialtiesPending] = useState(false);
 
-  // DOC-57 - "Manager Password Reset". `onResetPassword` is only ever
-  // passed by ManagerDashboard.jsx for rows in the Employees/Operators
-  // sections (task spec: "Only Manager sees it" / "Do not show Reset
-  // Password for: manager rows, system_admin, the Manager themselves") -
-  // this component structurally never renders a Manager's or System
-  // Admin's own row at all (see ManagerDashboard.jsx's UserRoleSection,
-  // which only ever builds Employee/Operator groups), so no additional
-  // role guard is needed here beyond the same "only render the control if
-  // the prop was actually passed" pattern every other action on this row
-  // already uses.
-  const [showResetPassword, setShowResetPassword] = useState(false);
-  const [resetNewPassword, setResetNewPassword] = useState('');
-  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  // DOC-57 - "Manager Password Reset", redesigned by Sprint 7 - "SMS +
+  // Phone Authentication Upgrade" (task spec Phase 12). `onResetPassword`
+  // is only ever passed by ManagerDashboard.jsx for rows in the
+  // Employees/Operators sections (task spec: "Only Manager sees it" / "Do
+  // not show Reset Password for: manager rows, system_admin, the Manager
+  // themselves") - this component structurally never renders a Manager's
+  // or System Admin's own row at all (see ManagerDashboard.jsx's
+  // UserRoleSection, which only ever builds Employee/Operator groups), so
+  // no additional role guard is needed here beyond the same "only render
+  // the control if the prop was actually passed" pattern every other
+  // action on this row already uses.
+  //
+  // Sprint 7 removed the Manager's ability to type/see a new password
+  // entirely (task spec: "Prefer sending a system-generated temporary
+  // password directly to user's verified phone... do not let Manager
+  // know/send plaintext password") - there is no longer a form here, only
+  // a confirm/cancel step exactly like the Deactivate confirm panel above
+  // (`showDeactivateConfirm`), since triggering this now takes no input at
+  // all: the backend generates the temporary password and SMS's it to the
+  // target user's own verified phone (user.controller.js's
+  // performPasswordReset).
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetPending, setResetPending] = useState(false);
   const [resetError, setResetError] = useState('');
   const [resetSuccessMessage, setResetSuccessMessage] = useState('');
@@ -217,65 +226,40 @@ function OrganizationUserRow({
     }
   };
 
-  // DOC-57 - opens a fresh panel every time (never reuses a previous
-  // attempt's leftover error/success message or typed values) - the same
-  // "start clean" pattern openEdit/openManageSpecialties already use.
-  const openResetPassword = () => {
+  // Sprint 7 - opens a fresh confirm panel every time (never reuses a
+  // previous attempt's leftover error/success message) - the same "start
+  // clean" pattern openEdit/openManageSpecialties already use.
+  const openResetConfirm = () => {
     setError('');
     setResetError('');
     setResetSuccessMessage('');
-    setResetNewPassword('');
-    setResetConfirmPassword('');
-    setShowResetPassword(true);
+    setShowResetConfirm(true);
   };
 
-  const closeResetPassword = () => {
-    setShowResetPassword(false);
-    setResetNewPassword('');
-    setResetConfirmPassword('');
+  const closeResetConfirm = () => {
+    setShowResetConfirm(false);
     setResetError('');
     setResetSuccessMessage('');
   };
 
-  const handleResetPasswordSubmit = async (event) => {
-    event.preventDefault();
+  // Sprint 7 - no form fields to validate or submit anymore; confirming
+  // this action takes no input at all. `onResetPassword` (ManagerDashboard.
+  // jsx's handleResetPassword) calls PATCH /api/users/:id/reset-password
+  // with no body, which tells the backend to generate a temporary password
+  // and SMS it directly to the target user's own verified phone - this
+  // component never sees, types, or displays that password at any point.
+  const handleConfirmReset = async () => {
     setResetError('');
     setResetSuccessMessage('');
-
-    if (!resetNewPassword || !resetConfirmPassword) {
-      setResetError('New password and confirmation are both required.');
-      return;
-    }
-    if (resetNewPassword !== resetConfirmPassword) {
-      setResetError('Passwords do not match.');
-      return;
-    }
-    if (resetNewPassword.length < MIN_PASSWORD_LENGTH) {
-      setResetError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
-      return;
-    }
-    if (resetNewPassword.length > MAX_PASSWORD_LENGTH) {
-      setResetError(`Password must be at most ${MAX_PASSWORD_LENGTH} characters.`);
-      return;
-    }
-
     setResetPending(true);
     try {
-      await onResetPassword(user, { newPassword: resetNewPassword, confirmPassword: resetConfirmPassword });
-      // Task spec: clear the fields immediately, never display the
-      // password again after success, and never log it - the two typed
-      // values are discarded right here, this component holds no other
-      // copy of them anywhere (no localStorage, nothing sent to
-      // console.*).
-      setResetNewPassword('');
-      setResetConfirmPassword('');
-      setResetSuccessMessage('Password reset successfully. The user must change it at the next login.');
+      await onResetPassword(user);
+      setResetSuccessMessage('A temporary password has been sent to this user by SMS. They must set a new password at their next login.');
     } catch (err) {
-      // Failed: fields are deliberately NOT cleared here (unlike the
-      // success path) so the Manager doesn't have to retype a password
-      // they already chose, just because of e.g. a transient network
-      // error - the backend's own client-safe error message is shown
-      // inline instead.
+      // Failed (most commonly: this user has no verified phone number yet,
+      // or the SMS provider failed to deliver) - the backend's own
+      // client-safe error message is shown inline; the confirm panel stays
+      // open so the Manager can simply try again.
       setResetError(err.message);
     } finally {
       setResetPending(false);
@@ -374,60 +358,42 @@ function OrganizationUserRow({
     );
   }
 
-  if (showResetPassword) {
+  // Sprint 7 - replaced the old newPassword/confirmPassword form with a
+  // simple confirm/cancel step (same visual language as the Deactivate
+  // confirm panel above) - there is nothing left for the Manager to type,
+  // only a decision to make.
+  if (showResetConfirm) {
     return (
       <tr>
         <td colSpan={5}>
-          <div className="user-row-edit-form">
-            <p className="user-row-edit-title">Reset Password for {user.fullName}</p>
-
+          <div className="cancel-confirm-panel">
+            <p className="user-row-edit-title">Send Temporary Password to {user.fullName}?</p>
             {resetSuccessMessage ? (
               <>
                 <p className="form-success">{resetSuccessMessage}</p>
                 <div className="form-actions form-actions-row">
-                  <button type="button" className="btn btn-outline" onClick={closeResetPassword}>
+                  <button type="button" className="btn btn-outline" onClick={closeResetConfirm}>
                     Close
                   </button>
                 </div>
               </>
             ) : (
-              <form onSubmit={handleResetPasswordSubmit} noValidate>
-                <div className="user-row-edit-fields">
-                  <div className="form-group user-row-edit-field">
-                    <label htmlFor={`reset-new-password-${user.id}`}>New Password</label>
-                    <input
-                      id={`reset-new-password-${user.id}`}
-                      name="newPassword"
-                      type="password"
-                      value={resetNewPassword}
-                      onChange={(event) => setResetNewPassword(event.target.value)}
-                      disabled={resetPending}
-                      autoComplete="new-password"
-                    />
-                  </div>
-                  <div className="form-group user-row-edit-field">
-                    <label htmlFor={`reset-confirm-password-${user.id}`}>Confirm Password</label>
-                    <input
-                      id={`reset-confirm-password-${user.id}`}
-                      name="confirmPassword"
-                      type="password"
-                      value={resetConfirmPassword}
-                      onChange={(event) => setResetConfirmPassword(event.target.value)}
-                      disabled={resetPending}
-                      autoComplete="new-password"
-                    />
-                  </div>
-                </div>
-                {resetError && <span className="form-error">{resetError}</span>}
+              <>
+                <p>
+                  A secure, system-generated temporary password will be sent by SMS to this user&apos;s verified phone
+                  number. You will not see or choose this password - the user must set a new permanent password the
+                  next time they log in.
+                </p>
+                {resetError && <p className="form-error form-error-server">{resetError}</p>}
                 <div className="form-actions form-actions-row">
-                  <button type="submit" className="btn btn-primary" disabled={resetPending}>
-                    {resetPending ? 'Resetting...' : 'Reset Password'}
-                  </button>
-                  <button type="button" className="btn btn-outline" onClick={closeResetPassword} disabled={resetPending}>
+                  <button type="button" className="btn btn-outline" onClick={closeResetConfirm} disabled={resetPending}>
                     Cancel
                   </button>
+                  <button type="button" className="btn btn-primary" onClick={handleConfirmReset} disabled={resetPending}>
+                    {resetPending ? 'Sending...' : 'Send Temporary Password'}
+                  </button>
                 </div>
-              </form>
+              </>
             )}
           </div>
         </td>
@@ -526,8 +492,8 @@ function OrganizationUserRow({
               rows only) - see this component's own comment on that prop
               above for why no further role guard is needed here. */}
           {typeof onResetPassword === 'function' && (
-            <button type="button" className="btn btn-outline" onClick={openResetPassword}>
-              Reset Password
+            <button type="button" className="btn btn-outline" onClick={openResetConfirm}>
+              Send Temporary Password
             </button>
           )}
         </div>

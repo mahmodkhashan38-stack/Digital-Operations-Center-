@@ -172,6 +172,14 @@ const run = async () => {
     passwordHash,
     role: 'system_admin',
     organizationId: null,
+    // Sprint 7 - "SMS + Phone Authentication Upgrade". System Admin never
+    // collects a phone number (see models/User.js's own schema comment) -
+    // explicit here rather than relying solely on the schema default
+    // ('pending') plus the login gate's own system_admin exemption
+    // (controllers/auth.controller.js's `login`), so this account's own
+    // stored state is honest on its own terms, not just "happens to never
+    // be checked".
+    phoneVerificationStatus: 'not_required',
   });
 
   console.log('System Admin created successfully:');

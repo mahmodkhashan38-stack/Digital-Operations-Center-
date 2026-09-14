@@ -11,7 +11,9 @@
     "migrate:request-images-to-s3": "node scripts/migrateRequestImagesToS3.js",
     "backfill:request-activity": "node scripts/backfillRequestActivity.js",
     "migrate:request-numbers": "node scripts/migrateRequestNumbers.js",
-    "seed:system-admin": "node scripts/seedSystemAdmin.js"
+    "seed:system-admin": "node scripts/seedSystemAdmin.js",
+    "reset:tenant-data": "node scripts/resetTenantData.js",
+    "reset:tenant-data:dry-run": "node scripts/resetTenantData.js --dry-run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1111.0",

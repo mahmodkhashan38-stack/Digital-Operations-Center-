@@ -420,6 +420,41 @@ function Profile() {
               <p className="field-hint">Email is read-only and cannot be changed from your profile.</p>
             </div>
 
+            {/* Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec
+                Phase 10 "PROFILE UPDATE" - "Display verified phone number
+                (masked for privacy)"). Read-only, exactly like Email above -
+                this page has never let a person edit their own phone number,
+                and this ticket does not add that capability; the RAW phone
+                number is never sent to the client at all (see
+                auth.controller.js's sanitizeUser - only phoneNumberMasked
+                ever leaves the backend), so there would be nothing to
+                prefill an edit form with even if one existed. System Admin
+                is the one role with no phone number at all
+                (phoneVerificationStatus: 'not_required', seedSystemAdmin.js)
+                - shown as a platform-level notice, the same pattern
+                `organizationDisplay` above already uses for that role. */}
+            <div className="form-group">
+              <label htmlFor="profile-phone">Phone Number</label>
+              <input
+                id="profile-phone"
+                type="text"
+                value={user.role === 'system_admin' ? 'Not applicable' : (user.phoneNumberMasked || 'Not set')}
+                disabled
+                readOnly
+              />
+              {user.role !== 'system_admin' && (
+                // Reuses the existing, already-styled form-success/form-error
+                // classes (every other page in this project uses these same
+                // two classes for a positive/negative inline status - there
+                // is no separate "field-hint-success" variant to invent).
+                <p className={user.phoneVerificationStatus === 'verified' ? 'form-success' : 'form-error'}>
+                  {user.phoneVerificationStatus === 'verified'
+                    ? 'Verified - you can receive SMS notifications and password recovery codes at this number.'
+                    : 'Not yet verified - you must verify your phone number before you can sign in.'}
+                </p>
+              )}
+            </div>
+
             <div className="org-info-details">
               <div className="org-card-detail">
                 <span className="stat-label">Role</span>

@@ -1,13 +1,19 @@
 // Reusable presentational fieldset for collecting a Manager's
-// { fullName, email, password }. Used by CreateOrganizationForm (optional
-// initial Manager, DOC-34), OrganizationCard's "Assign Manager" action
-// (DOC-34) and "Replace Manager" action (DOC-49) - all three need a brand
-// new account's fullName/email/password.
+// { fullName, email, password, phoneNumber }. Used by
+// CreateOrganizationForm (optional initial Manager, DOC-34),
+// OrganizationCard's "Assign Manager" action (DOC-34) and "Replace
+// Manager" action (DOC-49) - all three need a brand new account's
+// fullName/email/password/phoneNumber.
 //
 // `showPassword` (DOC-49, default true) lets OrganizationCard's "Edit
 // Manager" action reuse the same fullName/email markup WITHOUT a password
-// field - editing an existing Manager's profile never touches their
-// password, so there is nothing to collect here for that case.
+// (or, Sprint 7, phone) field - editing an existing Manager's profile
+// never touches their password or phone, so there is nothing to collect
+// here for that case. Sprint 7 - "SMS + Phone Authentication Upgrade"
+// (task spec Phase 4 "MANAGER CREATION" - "System Admin enters: Manager
+// name, Manager email, Manager phone") reuses this exact same
+// `showPassword` gate for the new phone field, since both are only ever
+// meaningful at brand-new-account-creation time.
 //
 // This component never stores anything outside the parent's own state
 // (React state only, no localStorage/sessionStorage - see AdminDashboard
@@ -86,6 +92,33 @@ function ManagerFormFields({ values, errors, onChange, idPrefix, showPassword = 
           </div>
           {errors.password && <span className="form-error">{errors.password}</span>}
           <span className="form-hint">Share this password with the Manager directly - it cannot be viewed again here.</span>
+        </div>
+      )}
+
+      {showPassword && (
+        <div className="form-group">
+          <label htmlFor={fieldId('phoneNumber')}>Manager Phone</label>
+          <div className="input-group">
+            <span className="input-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="6" y="2" width="12" height="20" rx="2" />
+                <path d="M11 18h2" />
+              </svg>
+            </span>
+            <input
+              id={fieldId('phoneNumber')}
+              name="phoneNumber"
+              type="tel"
+              placeholder="+972501234567"
+              value={values.phoneNumber}
+              onChange={onChange}
+              autoComplete="off"
+            />
+          </div>
+          {errors.phoneNumber && <span className="form-error">{errors.phoneNumber}</span>}
+          <span className="form-hint">
+            The Manager will receive a verification code by SMS and must verify this number before signing in.
+          </span>
         </div>
       )}
     </>

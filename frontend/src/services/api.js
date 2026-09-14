@@ -137,13 +137,21 @@ export const authApi = {
   // requirePasswordChangeCompleted.js - this route never has that
   // middleware composed into its chain at all).
   changePassword: (payload, token) => request('/auth/change-password', { method: 'PATCH', body: payload, token }),
-  // DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
-  // PUBLIC - no token, same shape as register/login above. `payload` is
-  // always exactly { email, companyCode } - this project has no email
-  // delivery, so the response is always a safe, generic status message,
-  // never a token or account data (see backend's forgotPassword for the
-  // full enumeration-resistance contract).
+  // Sprint 7 - "SMS + Phone Authentication Upgrade". REPLACES DOC-70's
+  // Manager-approval flow - PUBLIC, no token, same shape as register/login
+  // above. `payload` is always exactly { email, companyCode } (never a
+  // destination phone - the backend only ever sends to the account's own
+  // already-verified number). The response is always the same safe,
+  // generic status message regardless of outcome (see backend's
+  // forgotPassword for the full enumeration-resistance contract) - never
+  // a token or account data.
   forgotPassword: (payload) => request('/auth/forgot-password', { method: 'POST', body: payload }),
+  // Sprint 7 - phone verification (task spec Phase 4/9). PUBLIC - the
+  // account cannot authenticate yet at this point. `userId` comes from
+  // `register`'s own 201 response. `code` is the 6-digit OTP the user
+  // just received by SMS.
+  verifyPhone: (payload) => request('/auth/verify-phone', { method: 'POST', body: payload }),
+  resendPhoneOtp: (payload) => request('/auth/resend-phone-otp', { method: 'POST', body: payload }),
   // DOC-69 - "Login History & Active Sessions". Revokes the CURRENT
   // server-side session before AuthContext.jsx clears the local token -
   // see that file's own `logout` for why this is wrapped in a try/catch
@@ -305,36 +313,21 @@ export const userApi = {
   // entirely from the scoped :id lookup and rejects anything that isn't
   // currently an Operator in the caller's own Organization.
   updateSpecialties: (id, categoryIds, token) => request(`/users/${id}/specialties`, { method: 'PATCH', body: { categoryIds }, token }),
-  // DOC-57 - Flow B, "Manager Password Reset". `payload` is always
-  // exactly { newPassword, confirmPassword } - the Manager never sends
-  // and never sees the target's old password. Only usable on an Employee
-  // or Operator in the Manager's own Organization (never self, another
-  // Manager, or System Admin) - the backend is the sole authority on
-  // that, this client does not attempt to predict it beyond simply never
-  // rendering the control on a Manager/System-Admin row (this component
-  // never receives one anyway - see OrganizationUserRow.jsx's own
-  // comment).
-  resetPassword: (id, payload, token) => request(`/users/${id}/reset-password`, { method: 'PATCH', body: payload, token }),
-  // DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
-  // Manager-only, own Organization only (backend-enforced) - see
-  // routes/user.routes.js. `status` is optional; omitted, the backend
-  // returns every request (newest first) so the Manager can see history,
-  // not just the current pending queue.
-  listPasswordResetRequests: (token, status) => request(
-    `/users/password-reset-requests${status ? `?status=${encodeURIComponent(status)}` : ''}`,
-    { method: 'GET', token },
-  ),
-  // `payload` is always exactly { newPassword, confirmPassword } - the
-  // same shape resetPassword above already sends, since this ultimately
-  // performs the exact same backend reset mechanism.
-  approvePasswordResetRequest: (id, payload, token) => request(
-    `/users/password-reset-requests/${id}/approve`,
-    { method: 'PATCH', body: payload, token },
-  ),
-  rejectPasswordResetRequest: (id, token) => request(
-    `/users/password-reset-requests/${id}/reject`,
-    { method: 'PATCH', token },
-  ),
+  // DOC-57 - Flow B, "Manager Password Reset". Sprint 7 - "SMS + Phone
+  // Authentication Upgrade" REWROTE this endpoint's own behavior: no body
+  // is sent anymore - the Manager never chooses, sends, or sees a
+  // password at all. The backend generates a secure temporary password
+  // and sends it by SMS directly to the target's own verified phone; this
+  // call simply triggers that. Only usable on an Employee or Operator in
+  // the Manager's own Organization (never self, another Manager, or
+  // System Admin) - the backend is the sole authority on that.
+  resetPassword: (id, token) => request(`/users/${id}/reset-password`, { method: 'PATCH', token }),
+  // DOC-70's listPasswordResetRequests/approvePasswordResetRequest/
+  // rejectPasswordResetRequest calls (Manager-approval Forgot Password
+  // review queue) have been REMOVED by Sprint 7 - "SMS + Phone
+  // Authentication Upgrade". Forgot Password is now fully self-service
+  // (authApi.forgotPassword above) with no Manager review step - see
+  // backend/src/models/PasswordResetRequest.js's own retirement notice.
 };
 
 // Service Category management API calls (DOC-43). Manager-only on the

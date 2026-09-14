@@ -4,13 +4,20 @@ const User = require('../models/User');
 const Organization = require('../models/Organization');
 const { normalizeCompanyCode, isValidCompanyCode } = require('../utils/companyCode');
 const { validatePassword, MIN_PASSWORD_LENGTH } = require('../utils/passwordPolicy');
-// DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
-const PasswordResetRequest = require('../models/PasswordResetRequest');
-const { createNotification } = require('../services/notification.service');
 // DOC-69 - "Login History & Active Sessions".
 const {
   generateTokenId, createSession, revokeSession, revokeAllSessionsForUser,
 } = require('../services/userSession.service');
+// Sprint 7 - "SMS + Phone Authentication Upgrade". Replaces DOC-70's old
+// PasswordResetRequest/Manager-approval flow (see models/
+// PasswordResetRequest.js's own retirement notice) with phone
+// verification (registration) and a self-service, SMS-delivered
+// temporary password (forgotPassword).
+const { normalizePhoneNumber, isValidE164, maskPhoneNumber } = require('../utils/phoneNumber');
+const { generateTempPassword } = require('../utils/tempPassword');
+const phoneVerificationService = require('../services/phoneVerification.service');
+const { sendSms } = require('../services/sms.service');
+const { recordAuditLog } = require('../services/auditLog.service');
 
 const SALT_ROUNDS = 10;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -57,6 +64,16 @@ function sanitizeProfileImage(user) {
   };
 }
 
+// Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec Phase 3
+// "PHONE PRIVACY" - "Do not expose full phone numbers unnecessarily").
+// The raw E.164 `phoneNumber` is NEVER included in any API response, not
+// even to the account's own owner - `phoneNumberMasked` (task spec's own
+// example shape: "+972 5X XXX 1234") is sufficient for every existing UX
+// need (Profile's own "is my phone verified" display, the registration/
+// Manager-creation OTP step's "we sent a code to ...1234" confirmation -
+// both of which already know the full number from the form the caller
+// themselves just typed it into, so the server never needs to echo it
+// back in full).
 const sanitizeUser = (user) => ({
   id: user._id,
   fullName: user.fullName,
@@ -69,6 +86,8 @@ const sanitizeUser = (user) => ({
   bio: user.bio || null,
   hasProfileImage: !!user.profileImage,
   profileImage: sanitizeProfileImage(user),
+  phoneNumberMasked: maskPhoneNumber(user.phoneNumber),
+  phoneVerificationStatus: user.phoneVerificationStatus,
 });
 
 // POST /api/auth/register
@@ -84,12 +103,20 @@ const sanitizeUser = (user) => ({
 // "ABC123" actually resolves to - the extra fields are simply never read.
 const register = async (req, res, next) => {
   try {
-    const { fullName, email, password, companyCode } = req.body || {};
+    const {
+      fullName, email, password, companyCode, phoneNumber,
+    } = req.body || {};
 
-    if (!fullName || !email || !password || !companyCode) {
+    // Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec Phase 3/9
+    // "REGISTRATION DECISION" - "Employee registration: Email, Password,
+    // Full Name, Company Code, Phone Number"). Required alongside the
+    // four pre-existing fields, never optional - task spec's own standing
+    // goal is "every new Employee/Operator/Manager account must have a
+    // real, verified phone number".
+    if (!fullName || !email || !password || !companyCode || !phoneNumber) {
       return res.status(400).json({
         status: 'error',
-        message: 'fullName, email, password and companyCode are all required.',
+        message: 'fullName, email, password, companyCode and phoneNumber are all required.',
       });
     }
 
@@ -125,6 +152,29 @@ const register = async (req, res, next) => {
       return res.status(409).json({ status: 'error', message: 'An account with this email already exists.' });
     }
 
+    // Sprint 7 - phone format + uniqueness, checked BEFORE the Organization
+    // lookup below purely so an obviously-malformed number is rejected
+    // with the cheapest possible check first (no different in outcome -
+    // every check here is independent and short-circuits on its own).
+    // normalizePhoneNumber never throws (see utils/phoneNumber.js) - a
+    // `null` result means "could not be confidently normalized to E.164",
+    // treated as a plain input-format error, the same as an invalid email.
+    const normalizedPhoneNumber = normalizePhoneNumber(phoneNumber);
+    if (!isValidE164(normalizedPhoneNumber)) {
+      return res.status(400).json({ status: 'error', message: 'Please provide a valid phone number.' });
+    }
+    // Application-level check for a clear, specific 409 (task spec Phase 3
+    // "PHONE UNIQUENESS" - "Handle duplicates cleanly") - the partial
+    // unique index on User.phoneNumber (models/User.js) is the database-
+    // level backstop against the narrow race window between this check
+    // and the insert below, exactly the same two-layer defense
+    // utils/companyCode.js's own generateUniqueCompanyCode +
+    // Organization.companyCode's unique index already establish.
+    const existingPhoneUser = await User.findOne({ phoneNumber: normalizedPhoneNumber });
+    if (existingPhoneUser) {
+      return res.status(409).json({ status: 'error', message: 'An account with this phone number already exists.' });
+    }
+
     // A code that doesn't resolve to any Organization, and a code that
     // resolves to an inactive one, return the exact same generic message
     // and status - the same anti-enumeration principle already used by
@@ -154,16 +204,63 @@ const register = async (req, res, next) => {
     // limitation: the resulting user would simply belong to an Organization
     // that is now inactive, the same state DOC-38 will already need to
     // handle for any Organization deactivated after it has active members.
+    //
+    // Sprint 7 - the account is created HERE, already carrying
+    // `phoneNumber` and the schema default `phoneVerificationStatus:
+    // 'pending'` - task spec Phase 4's own flow ("Registration -> enter
+    // phone number -> backend creates verification challenge -> SMS OTP
+    // sent -> user enters OTP -> backend verifies -> account becomes
+    // phone-verified") is deliberately implemented as "create the real
+    // account now, gate LOGIN on verification" rather than a separate
+    // "pending registration" side-table - see services/
+    // phoneVerification.service.js's own top comment and this project's
+    // established "do not build a second X engine" precedent for why this
+    // is the simpler, equally-safe design: an unverified account cannot
+    // authenticate at all (see `login` below), so it can never "fully use
+    // the account" (task spec) regardless of the fact that a User document
+    // already exists for it.
     const user = await User.create({
       fullName: fullName.trim(),
       email: normalizedEmail,
       passwordHash,
       organizationId: organization._id,
+      phoneNumber: normalizedPhoneNumber,
+      phoneVerificationStatus: 'pending',
     });
+
+    // SECURITY-CRITICAL SMS FAILURE (task spec Phase 5 - "SMS delivery
+    // failure should cause the security operation to fail safely"). If the
+    // OTP could not be sent, this entire registration is rolled back
+    // (compensating delete, not a transaction - see this project's
+    // established reasoning for why) rather than leaving behind an account
+    // that can never complete phone verification and therefore can NEVER
+    // log in through any path this project exposes.
+    const challengeResult = await phoneVerificationService.issueChallenge({
+      userId: user._id,
+      phoneNumber: normalizedPhoneNumber,
+      organizationId: organization._id,
+    });
+    if (!challengeResult.success) {
+      await User.deleteOne({ _id: user._id }).catch((cleanupError) => {
+        // eslint-disable-next-line no-console
+        console.error('Failed to roll back user after phone verification SMS failure:', cleanupError.message);
+      });
+      return res.status(502).json({ status: 'error', message: challengeResult.error });
+    }
 
     return res.status(201).json({ status: 'success', data: sanitizeUser(user) });
   } catch (error) {
     if (error.code === 11000) {
+      // Sprint 7 - the duplicate-key backstop can now fire for either the
+      // email OR the phoneNumber partial unique index (models/User.js) -
+      // `error.keyPattern` names which one actually collided, so this
+      // never misreports a phone collision as an email collision or vice
+      // versa (both are already checked explicitly above; this branch is
+      // only ever reached via the narrow race window neither check can
+      // fully close on its own).
+      if (error.keyPattern && error.keyPattern.phoneNumber) {
+        return res.status(409).json({ status: 'error', message: 'An account with this phone number already exists.' });
+      }
       return res.status(409).json({ status: 'error', message: 'An account with this email already exists.' });
     }
     if (error.name === 'ValidationError') {
@@ -201,6 +298,29 @@ const login = async (req, res, next) => {
     const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
       return res.status(401).json({ status: 'error', message: 'Invalid email or password.' });
+    }
+
+    // Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec: "Do not
+    // allow an unverified phone to become a fully active account"). This
+    // is the ONE place that gate is actually enforced - a correct
+    // email/password is no longer sufficient by itself for any
+    // employee/manager/operator account. system_admin is structurally
+    // exempt (DOC-31's global account never collects a phone number at
+    // all - see models/User.js's own `phoneVerificationStatus` default
+    // and scripts/seedSystemAdmin.js, which explicitly sets
+    // 'not_required'). Checked AFTER the password match above (never
+    // before) so a wrong-password attempt against an unverified account
+    // still reveals nothing beyond the existing "Invalid email or
+    // password." - only a caller who has already proven they know the
+    // correct password learns that phone verification is what's blocking
+    // them, which is not a meaningful account-existence leak (they have
+    // already proven the account exists and is theirs).
+    if (user.role !== 'system_admin' && user.phoneVerificationStatus !== 'verified') {
+      return res.status(403).json({
+        status: 'error',
+        message: 'Please verify your phone number before signing in. Check your SMS messages for a verification code.',
+        data: { userId: user._id, phoneVerificationRequired: true },
+      });
     }
 
     // DOC-69 - "Login History & Active Sessions". Every successful login
@@ -332,12 +452,40 @@ const changePassword = async (req, res, next) => {
       });
     }
 
+    // Sprint 7 - captured BEFORE mutating `mustChangePassword` below, so
+    // this reads "was this a forced change (a temporary SMS password or a
+    // Manager emergency reset), or a routine voluntary change?" - used
+    // only to decide whether to record PASSWORD_RESET_COMPLETED afterward
+    // (task spec Phase 13 - "PASSWORD_RESET_COMPLETED"). Never affects the
+    // password-change logic itself, which is identical either way.
+    const wasForcedPasswordReset = !!user.mustChangePassword;
+
     user.passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
     // Self-change always clears the forced-change flag, regardless of
     // whatever it was before - this is the ONLY way (besides a fresh
     // Manager reset re-setting it) this field ever changes value.
     user.mustChangePassword = false;
     await user.save();
+
+    if (wasForcedPasswordReset) {
+      // Sprint 7 - task spec Phase 13: "PASSWORD_RESET_COMPLETED". Recorded
+      // here (never a new endpoint) because this IS the existing endpoint
+      // that completes the forced-change flow, regardless of whether the
+      // original reset was the new self-service SMS flow or a Manager
+      // emergency reset (controllers/user.controller.js's
+      // `resetUserPassword`) - both set `mustChangePassword: true` the
+      // same way, so both are closed out identically here. `actorId` is
+      // the user themselves (self-action).
+      recordAuditLog({
+        actorId: user._id,
+        organizationId: user.organizationId,
+        action: 'PASSWORD_RESET_COMPLETED',
+        targetType: 'User',
+        targetId: user._id,
+        changes: null,
+        metadata: { targetUserId: user._id, targetUserName: user.fullName },
+      });
+    }
 
     // DOC-69 - "Login History & Active Sessions" (task spec section 18).
     // POLICY: every OTHER active session for this user is revoked - a
@@ -363,80 +511,45 @@ const changePassword = async (req, res, next) => {
 
 // POST /api/auth/forgot-password (PUBLIC - no verifyToken)
 //
-// DOC-70 - "Forgot Password / Password Recovery via Manager Approval". This
-// project has no email delivery (task spec's own standing constraint: no
-// SMTP, no third-party provider, no public reset links) - recovery is
-// instead routed through the requesting User's own Organization Manager,
-// who reviews and (if legitimate) resets the password through the
-// existing, unchanged Manager Reset Password mechanism (see
-// controllers/user.controller.js's `performPasswordReset`). This endpoint
-// only ever CREATES a review request - it never itself touches a password.
+// Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec Phase 7 -
+// "REPLACE MANAGER-APPROVAL FORGOT PASSWORD"). REPLACES DOC-70's entire
+// Manager-approval flow (see models/PasswordResetRequest.js's own
+// retirement notice): there is no review step, no Manager involvement, no
+// PasswordResetRequest document, and no PASSWORD_RESET_REQUESTED
+// notification anymore. New flow: identity validation (email + companyCode
+// - task spec Phase 7 "FORGOT PASSWORD INPUT": "Prefer NOT asking the user
+// to choose a destination phone... send only to the already-verified
+// number already stored for that account" - this endpoint's input shape
+// is therefore UNCHANGED from DOC-70's, on purpose, and there is no
+// `phoneNumber` field read from the body anywhere in this function) ->
+// generate a secure temporary password server-side -> bcrypt hash stored
+// -> mustChangePassword=true -> ALL sessions revoked -> the temporary
+// password sent by SMS to the account's own stored, verified number only.
 //
-// ACCEPTS ONLY email + companyCode (task spec section 5) - userId,
-// organizationId, role, and password are never read from the body even if
-// present, the same explicit-read discipline `register` above already
-// uses. companyCode normalization/validation is reused verbatim from
-// utils/companyCode.js (task spec section 7) - no second implementation.
+// MANAGER ACCOUNTS ARE NO LONGER EXCLUDED (a deliberate change from
+// DOC-70): the old exclusion existed ONLY because no OTHER Manager could
+// ever approve a fellow Manager's reset request (see git history/DOC-70's
+// retired comment above, in models/PasswordResetRequest.js). That
+// structural reason no longer applies - this flow is fully self-service,
+// gated only by "does this account have its own verified phone", so a
+// Manager who forgets their password can now use this exact same endpoint
+// like anyone else. System Admin remains structurally excluded
+// (organizationId is always `null` - the query below can never match one).
 //
-// ACCOUNT-ENUMERATION DECISION (task spec section 6 - "choose a reasonable
-// balance... document the decision"):
-//   - A malformed email/companyCode (wrong shape) is a pure input-format
-//     problem, not an enumeration risk - rejected with a specific 400,
-//     mirroring `register`'s own existing behavior for the same fields.
-//   - An unknown/inactive companyCode returns the same specific 400
-//     `register` already returns for it ("No active organization was found
-//     for that company code."). A Company Code is NOT a secret (task spec
-//     itself, and utils/companyCode.js's own header comment: "it is just a
-//     random-looking label" shared openly with every employee for
-//     registration) - `register` already reveals company-code validity via
-//     an identical lookup, so keeping that one signal consistent between
-//     the two endpoints adds no new exposure.
-//   - Once a valid, active Organization is identified, whether a SPECIFIC
-//     EMAIL belongs to an account in it is the genuinely sensitive fact -
-//     "no matching account", "this account belongs to a Manager" (see
-//     below), and "a request was successfully created" all return the
-//     EXACT SAME generic 200 message, byte-for-byte, so none of the three
-//     can be distinguished from one another.
-//   - Two narrow, DELIBERATE exceptions to that generic-message rule,
-//     each directed by the task spec itself and documented in
-//     backend/README.md: an INACTIVE account gets a distinct, honest
-//     message (task spec section 9 explicitly requires this rather than
-//     folding it into the generic case), and an ALREADY-PENDING request
-//     gets the task spec's own literal example message (section 4). Both
-//     are accepted, intentional, minimal trade-offs against pure
-//     enumeration-resistance in exchange for clearer UX, exactly as the
-//     task spec invites ("choose a reasonable balance").
-//
-// SYSTEM ADMIN (task spec section 23): structurally excluded, not
-// special-cased - system_admin.organizationId is always `null` (DOC-31),
-// so the `User.findOne({ email, organizationId: organization._id })` query
-// below can never match one, regardless of email. Documented, not coded.
-//
-// MANAGER ACCOUNTS (task spec section 26 item 13 - "decided/documented"):
-// excluded here, folded into the generic "no matching account" response
-// (never a distinguishing message - see the enumeration decision above).
-// This is a direct consequence of reusing the existing Manager Reset
-// Password mechanism unchanged for approval (task spec section 12): that
-// mechanism's own `resolveManageableTarget` (user.controller.js) already
-// refuses to let a Manager reset ANOTHER Manager's password ("Managers
-// cannot modify another Manager.") - so a pending request targeting a
-// Manager could never be fulfilled by any Manager in the Organization
-// through this feature. Rather than create a request that can only ever
-// sit unapproved forever, or reveal "this email belongs to a Manager" to
-// an unauthenticated caller, this endpoint takes no action for a Manager
-// target at all. A Manager who is locked out is expected to contact their
-// System Administrator instead (System Admin already owns Manager account
-// creation/replacement - DOC-34/DOC-49).
-//
-// INACTIVE USERS (task spec section 9): never allowed to create a
-// request - deactivation must never be bypassable through this flow. No
-// PasswordResetRequest is created for one.
-//
-// DUPLICATE PROTECTION (task spec section 4): checked here first (clear,
-// fast message) AND enforced at the database level by a partial unique
-// index (see models/PasswordResetRequest.js) as defense in depth against
-// a race between two near-simultaneous submissions.
-const GENERIC_FORGOT_PASSWORD_MESSAGE = 'If the account information is valid, a password reset request has been submitted for manager review.';
+// ACCOUNT-ENUMERATION (task spec Phase 7 "ACCOUNT ENUMERATION" - "must not
+// reveal whether email/phone/org exists... generic response"). This
+// version is STRICTER than DOC-70's own documented trade-offs: the exact
+// same generic message is returned for every one of "no matching account",
+// "account deactivated", "account has no verified phone yet", "SMS
+// delivery failed", AND "success" - only a malformed email/companyCode
+// SHAPE (not an existence question) or an unknown/inactive companyCode
+// (unchanged from `register`'s own identical, pre-existing, non-secret
+// company-code signal) are ever distinguished. Whether SMS was actually
+// sent is a strictly more sensitive fact than DOC-70's own "is this a
+// Manager" question ever was, so this endpoint no longer carves out ANY
+// account-state-specific success/failure wording the way DOC-70's
+// "already pending"/"deactivated" messages did.
+const GENERIC_FORGOT_PASSWORD_MESSAGE = 'If the information you provided matches an eligible account, a temporary password has been sent by SMS to the phone number on file.';
 
 const forgotPassword = async (req, res, next) => {
   try {
@@ -471,75 +584,75 @@ const forgotPassword = async (req, res, next) => {
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Organization-scoped by construction (task spec section 8) - this is
-    // the ONE lookup that decides "does this email belong to THIS
-    // Organization", and it is never widened or re-run without the
-    // organizationId filter. A system_admin can never match (see header
-    // comment); a manager can (handled explicitly below, folded into the
-    // generic response).
+    // Organization-scoped by construction (task spec Phase 7's own
+    // isolation requirement) - this is the ONE lookup that decides "does
+    // this email belong to THIS Organization", never widened or re-run
+    // without the organizationId filter. A system_admin can never match
+    // (see header comment); a manager now CAN (see header comment on why
+    // that exclusion was removed).
     const user = await User.findOne({ email: normalizedEmail, organizationId: organization._id });
 
-    if (!user || user.role === 'manager') {
-      return res.status(200).json({ status: 'success', message: GENERIC_FORGOT_PASSWORD_MESSAGE });
-    }
-
-    if (!user.isActive) {
-      return res.status(200).json({
-        status: 'success',
-        message: 'This account is currently deactivated. Please contact your Organization Manager for assistance.',
+    // Silent no-op for every condition that must not itself change the
+    // response: no matching account, inactive account, or no verified
+    // phone yet to deliver to (task spec: "Do not create a temporary
+    // password the user cannot receive" - there is nothing safe to send
+    // to, so nothing is generated at all). All three, and genuine
+    // success, return the IDENTICAL response below - see this function's
+    // own header comment.
+    if (user && user.isActive && user.phoneVerificationStatus === 'verified' && user.phoneNumber) {
+      // Generate the plaintext temporary password FIRST, and confirm SMS
+      // delivery BEFORE ever touching passwordHash/mustChangePassword/
+      // sessions (task spec Phase 5 "SECURITY SMS FAILURE" - "SMS
+      // delivery failure should cause the security operation to fail
+      // safely"). If the SMS cannot be sent, this account's password is
+      // left completely untouched - the plaintext value is discarded
+      // (never logged, never persisted) and the caller still receives the
+      // exact same generic response, so a delivery failure is never
+      // distinguishable from "no such account" externally.
+      const tempPassword = generateTempPassword();
+      const smsResult = await sendSms({
+        to: user.phoneNumber,
+        message: `DOC: Your temporary password is ${tempPassword}. Sign in and change it immediately. Do not share this password.`,
+        type: 'PASSWORD_RESET_TEMP_PASSWORD',
+        recipientUserId: user._id,
+        organizationId: organization._id,
       });
+
+      if (smsResult.success) {
+        user.passwordHash = await bcrypt.hash(tempPassword, SALT_ROUNDS);
+        user.mustChangePassword = true;
+        await user.save();
+
+        // Task spec Phase 7 "SESSION REVOCATION" - "Forgot Password must
+        // revoke ALL existing UserSessions... Reactivation does not apply
+        // here." Unlike self-service changePassword (which spares the
+        // CURRENT session), there is no "current session" here at all -
+        // this is an unauthenticated endpoint - so every session is
+        // revoked, no `exceptTokenId`.
+        await revokeAllSessionsForUser(user._id, 'PASSWORD_RESET');
+
+        // Task spec Phase 13 - "PASSWORD_RESET_SMS_REQUESTED". `actorId`
+        // is the account owner themselves (self-directed, pre-
+        // authentication action - see models/AuditLog.js's own comment on
+        // why this is one of the few entries whose actor is also its own
+        // target).
+        recordAuditLog({
+          actorId: user._id,
+          organizationId: organization._id,
+          action: 'PASSWORD_RESET_SMS_REQUESTED',
+          targetType: 'User',
+          targetId: user._id,
+          changes: null,
+          metadata: { targetUserId: user._id, targetUserName: user.fullName },
+        });
+      }
+      // A failed smsResult intentionally falls through to the exact same
+      // generic response below with no further action - see this
+      // function's own header comment.
     }
-
-    const existingPending = await PasswordResetRequest.findOne({ userId: user._id, status: 'pending' });
-    if (existingPending) {
-      return res.status(200).json({
-        status: 'success',
-        message: 'A password reset request is already pending review.',
-      });
-    }
-
-    const passwordResetRequest = await PasswordResetRequest.create({
-      organizationId: organization._id,
-      userId: user._id,
-      requestedEmail: normalizedEmail,
-    });
-
-    // DOC-18 - notify every Manager in this Organization (task spec
-    // section 17). System-generated (no authenticated actor exists at
-    // this point in the flow) - `actorId` is deliberately `null`, never
-    // the requesting user's own id (they are not authenticated, and even
-    // if they were, they are not the "actor" of a notification sent TO
-    // someone else). Best-effort and non-blocking, exactly like every
-    // other notification call site in this project: a notification
-    // failure never affects the success response already being prepared
-    // above, and the request has already been durably created regardless.
-    const managers = await User.find({ organizationId: organization._id, role: 'manager', isActive: true });
-    await Promise.all(managers.map((manager) => createNotification({
-      organizationId: organization._id,
-      recipientId: manager._id,
-      actorId: null,
-      type: 'PASSWORD_RESET_REQUESTED',
-      title: 'Password Reset Request',
-      message: `${user.fullName} has requested a password reset.`,
-      metadata: {
-        passwordResetRequestId: passwordResetRequest._id,
-        requestedUserId: user._id,
-        requestedUserName: user.fullName,
-      },
-    })));
 
     return res.status(200).json({ status: 'success', message: GENERIC_FORGOT_PASSWORD_MESSAGE });
   } catch (error) {
-    // A duplicate-key error from the partial unique index (the narrow
-    // race window the controller-level check above already mostly closes)
-    // is treated identically to the "already pending" case above - never
-    // exposed as a raw 500/database error.
-    if (error.code === 11000) {
-      return res.status(200).json({
-        status: 'success',
-        message: 'A password reset request is already pending review.',
-      });
-    }
     return next(error);
   }
 };
@@ -573,6 +686,99 @@ const logout = async (req, res, next) => {
   }
 };
 
+// POST /api/auth/verify-phone (PUBLIC - no verifyToken)
+//
+// Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec Phase 4).
+// Completes phone verification for a not-yet-verified account -
+// registration (a brand-new employee) and System-Admin-created Manager
+// accounts (controllers/organization.controller.js's
+// `createAndLinkManager`) both use this exact same endpoint; there is no
+// separate "verify a Manager's phone" route. PUBLIC on purpose: the whole
+// point is that the account CANNOT log in yet (see `login` above), so it
+// has no JWT to authenticate with - `userId` (returned by `register`'s own
+// 201 response, or known to the Manager from... their own account, which
+// they were just told to expect an SMS for) is the only identifier this
+// endpoint needs. Rate-limited at the route level (routes/auth.routes.js)
+// against brute-force OTP guessing - see services/
+// phoneVerification.service.js's own MAX_OTP_ATTEMPTS for the additional,
+// independent per-challenge attempt ceiling.
+const verifyPhone = async (req, res, next) => {
+  try {
+    const { userId, code } = req.body || {};
+    if (typeof userId !== 'string' || !userId.trim()) {
+      return res.status(400).json({ status: 'error', message: 'userId is required.' });
+    }
+
+    const user = await User.findById(userId);
+    // Never distinguishes "no such user" from "already verified" from
+    // "wrong code" beyond phoneVerification.service.js's own client-safe
+    // messages - a nonexistent/foreign userId simply never has a live
+    // challenge, so it naturally falls into the same "no active
+    // verification code found" message a real, already-verified account
+    // would also see.
+    if (!user) {
+      return res.status(400).json({ status: 'error', message: 'No active verification code found for this account. Request a new one.' });
+    }
+
+    const result = await phoneVerificationService.verifyChallenge({ userId: user._id, code });
+    if (!result.success) {
+      return res.status(400).json({ status: 'error', message: result.error });
+    }
+
+    // Task spec Phase 13 - "PHONE_VERIFIED".
+    recordAuditLog({
+      actorId: user._id,
+      organizationId: user.organizationId,
+      action: 'PHONE_VERIFIED',
+      targetType: 'User',
+      targetId: user._id,
+      changes: null,
+      metadata: { targetUserId: user._id, targetUserName: user.fullName },
+    });
+
+    return res.status(200).json({ status: 'success', message: 'Phone number verified. You can now sign in.' });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+// POST /api/auth/resend-phone-otp (PUBLIC - no verifyToken)
+//
+// Sprint 7 - re-issues a fresh OTP for an account that has not yet
+// completed phone verification (task spec Phase 4/8 - "Resend"). Reuses
+// `issueChallenge` exactly as `register`/`createAndLinkManager` already
+// do - never a second OTP-issuing implementation. Rate-limited at the
+// route level (routes/auth.routes.js) - task spec Phase 8 "Also
+// rate-limit: phone verification resend".
+const resendPhoneOtp = async (req, res, next) => {
+  try {
+    const { userId } = req.body || {};
+    if (typeof userId !== 'string' || !userId.trim()) {
+      return res.status(400).json({ status: 'error', message: 'userId is required.' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user || user.phoneVerificationStatus === 'verified' || !user.phoneNumber) {
+      // Generic - never reveals which of "no such user" / "already
+      // verified" / "no phone on file" applies.
+      return res.status(400).json({ status: 'error', message: 'Unable to resend a verification code for this account.' });
+    }
+
+    const result = await phoneVerificationService.issueChallenge({
+      userId: user._id,
+      phoneNumber: user.phoneNumber,
+      organizationId: user.organizationId,
+    });
+    if (!result.success) {
+      return res.status(502).json({ status: 'error', message: result.error });
+    }
+
+    return res.status(200).json({ status: 'success', message: 'A new verification code has been sent.' });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 // SALT_ROUNDS / EMAIL_REGEX / MIN_PASSWORD_LENGTH are exported so other
 // trusted server-side entry points (scripts/seedSystemAdmin.js,
 // controllers/organization.controller.js) validate email/password and hash
@@ -580,5 +786,17 @@ const logout = async (req, res, next) => {
 // duplicating these rules in a second place. DOC-57 adds `validatePassword`
 // itself to this same export list, for the same reason.
 module.exports = {
-  register, login, getMe, changePassword, forgotPassword, logout, sanitizeUser, SALT_ROUNDS, EMAIL_REGEX, MIN_PASSWORD_LENGTH, validatePassword,
+  register,
+  login,
+  getMe,
+  changePassword,
+  forgotPassword,
+  logout,
+  verifyPhone,
+  resendPhoneOtp,
+  sanitizeUser,
+  SALT_ROUNDS,
+  EMAIL_REGEX,
+  MIN_PASSWORD_LENGTH,
+  validatePassword,
 };

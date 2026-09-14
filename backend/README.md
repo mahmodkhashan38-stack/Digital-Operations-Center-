@@ -7025,3 +7025,332 @@ check.
 **Confirmations:** no backend/database changes of any kind; no
 password/secret/credential was read, written, or changed anywhere in
 this ticket; nothing was committed; nothing was pushed.
+
+## Sprint 7 - SMS + Phone Authentication Upgrade
+
+**Goal.** Move from Sprint 1-era email/password-only accounts to a
+phone-verified, SMS-enabled model: every new Employee/Manager/Operator
+account requires a real, verified phone number; every in-app Notification
+is also mirrored to SMS; Forgot Password no longer requires Manager
+approval (DOC-70's own approval workflow is retired) and instead
+self-service SMS-delivers a temporary password. Existing role/
+organization/JWT/session/security/isolation architecture (DOC-31/32/34/
+35/38/57/69) is completely unchanged - this ticket adds a phone/SMS layer
+on top of it, it does not redesign it.
+
+**Standing constraints honored throughout.** No production data was
+deleted; no MongoDB collection was manually dropped from application
+startup; no SMS provider credential is hardcoded anywhere (env vars
+only); no plaintext password is ever stored; no temporary password, OTP,
+phone verification code, SMS credential, or JWT is ever logged; every
+existing organization-isolation boundary (DOC-38) is unchanged; nothing
+was committed; nothing was pushed; no Jira/task-tracker item was marked
+Done automatically; the destructive tenant reset (`npm run
+reset:tenant-data`) was never executed in this session and remains an
+explicit, manual, `CONFIRM_TENANT_RESET=YES`-gated command.
+
+**Tenant reset script (`backend/scripts/resetTenantData.js`).** A
+stand-alone, non-imported-by-the-app Node script (never runs at server
+startup or via any code path `npm start` touches) that deletes every
+Organization and every non-System-Admin User, plus every document that
+belongs to one (Request, Notification, AuditLog, ChatMessage,
+DirectMessage/Conversation, OrganizationPolicy + acknowledgements,
+Knowledge question/answer, RequestRating, UserSession,
+PhoneVerificationChallenge, SmsDelivery), while preserving the single
+System Admin account and its own UserSession/AuditLog history untouched.
+Three independent safety layers, all required simultaneously:
+`--dry-run` (also its own `npm run reset:tenant-data:dry-run` script) logs
+every count it WOULD delete and returns without writing anything;
+`CONFIRM_TENANT_RESET=YES` must be set in the environment the real
+(non-dry-run) command is invoked in (never persisted in `.env`); and
+`assertExactlyOneSystemAdmin()` runs first and aborts the entire script if
+zero or more than one System Admin account exists, so a misconfigured
+database can never be "reset" into a state with no admin able to sign in
+afterward. Storage cleanup (S3/GridFS/legacy local-disk request images,
+profile images, chat/DM attachments) reuses the SAME already-existing
+`deleteImage`/`deleteAttachment` functions every other delete path in this
+project already calls - no duplicate storage-deletion logic was written.
+Exports `main` (the actual destructive entry point - never called by
+anything other than this script's own `require.main === module` guard or
+a human running `npm run reset:tenant-data`), plus two read-only helpers
+(`assertExactlyOneSystemAdmin`, `countAll`) that the test harness below
+imports and calls directly to sanity-check the real database without ever
+deleting anything.
+
+**Phone number field (`User.phoneNumber`/`phoneVerifiedAt`/
+`phoneVerificationStatus`).** Always stored normalized to E.164
+(`backend/src/utils/phoneNumber.js`'s `normalizePhoneNumber` - a small,
+dependency-free module, not a new npm package: strips punctuation, strips
+a local leading trunk "0", prefixes a caller-supplied default country
+calling code (`972`/Israel for this project's own target locale) when no
+"+" is present, and validates the result against `/^\+[1-9]\d{7,14}$/`).
+`phoneNumber` is `null` for System Admin (never required - see
+`seedSystemAdmin.js`'s own `phoneVerificationStatus: 'not_required'`) and
+for any pre-Sprint-7 legacy account (no automatic migration - the tenant
+reset script above is the documented path to a fully phone-verified user
+base). A partial unique index (`{ phoneNumber: 1 }`, `unique: true`,
+`partialFilterExpression: { phoneNumber: { $type: 'string' } }`) - the
+same pattern this project's own "at most one system_admin" index already
+established - lets every `null` (System Admin, legacy accounts) coexist
+while still rejecting a genuine duplicate real number at the database
+level; application-level duplicate checks in the register/Manager-creation
+controllers are the primary UX, this index is the backstop.
+`maskPhoneNumber` (same utility file) is the ONLY phone-shaped value ever
+returned to the client (`phoneNumberMasked` on `sanitizeUser`) - the raw
+`phoneNumber` field is never included in any API response.
+
+**Phone verification (`PhoneVerificationChallenge` model +
+`phoneVerification.service.js`).** One shared engine used identically by
+public registration and System-Admin-initiated Manager creation (task
+spec's own "do not bypass verification simply because System Admin
+created the user" - a Manager created by System Admin verifies through the
+exact same public `/api/auth/verify-phone` endpoint, gated by login just
+like an Employee, no bypass). `issueChallenge` invalidates any prior live
+challenge for that user first (at most one live OTP per user at any time),
+generates a 6-digit numeric OTP (`utils/otp.js`, `crypto.randomInt`, never
+`Math.random()`), stores only its bcrypt hash, sets a 10-minute expiry, and
+sends it by SMS BEFORE the challenge is considered real - if the SMS fails
+to send, the just-created challenge is deleted (a compensating rollback,
+not a MongoDB transaction - this project's standalone, non-replica-set
+MongoDB deployment has never supported multi-document transactions, the
+same documented reason `requestActivity.service.js`/
+`notification.service.js` already give) and the caller (register/
+createAndLinkManager) rolls back the User document it just created the
+same way. `verifyChallenge` enforces expiry, a `MAX_OTP_ATTEMPTS` (5)
+lockout, and one-time use (marks the challenge consumed on both success
+and permanent failure), and - on success - flips
+`phoneVerifiedAt`/`phoneVerificationStatus: 'verified'` on the User
+document in the same call, so no second "apply this verification" step
+exists anywhere.
+
+**Login gate.** `POST /api/auth/login` now checks
+`user.phoneVerificationStatus !== 'verified'` (skipped entirely for
+`system_admin`) AFTER the password matches, returning `403` with
+`{ userId, phoneVerificationRequired: true }` - an account is created
+immediately at registration/Manager-creation time (never a separate
+"pending registration" side-table), but structurally cannot authenticate
+until its phone is verified. This is the single enforcement point for the
+entire "no unverified phone becomes an active account" requirement.
+
+**SMS provider abstraction (`services/sms.service.js`).** The one place
+any code in this project sends an SMS. `SMS_PROVIDER=mock` (default) logs
+safe metadata only (masked recipient, type, message length - never the
+message itself) and always "succeeds" - zero configuration required for
+local development or this ticket's own test harness.
+`SMS_PROVIDER=twilio` is a REAL, working implementation calling Twilio's
+REST API directly over Node's built-in `https` module (no `@twilio` SDK
+dependency added - consistent with this project's existing "no new
+dependency for a single API call" discipline, the same reasoning
+`*AttachmentStorage.js` already applies to needing the real
+`@aws-sdk/client-s3` for S3's actual protocol but not for Twilio's simple
+one-endpoint REST call). Credentials (`TWILIO_ACCOUNT_SID`,
+`TWILIO_AUTH_TOKEN`, `SMS_FROM`) come only from environment variables,
+never hardcoded, never logged. `sendSms` never throws - it always resolves
+to `{ success, provider, failureCode }`, letting callers implement two
+different, independently-appropriate failure policies: ordinary
+notification mirroring (below) is best-effort/fire-and-forget and never
+blocks the underlying business operation; phone verification and
+Forgot-Password/Manager-reset temporary-password delivery are fail-safe -
+the security-critical database write only happens AFTER SMS success is
+confirmed, and nothing is left half-done on failure. Every send (success
+or failure, either provider) is logged to the new `SmsDelivery` model
+(recipient, organization, notification type, provider, status,
+failure code, timestamp) - which never stores the message body itself,
+for any type, so no OTP or temporary password is ever persisted anywhere
+outside the one bcrypt hash / one bcrypt-hashed password already required.
+
+**Notification-to-SMS mirroring.** Rather than adding an SMS call to each
+of the controllers that already create a Notification, the mirroring hook
+lives entirely inside `notification.service.js`'s own `createNotification`
+- immediately after the Notification document is created, if the
+recipient has a verified phone, the notification's own already-safe
+`message` field is reused verbatim (`DOC: ${message}`, capped at 300
+characters) as the SMS body and sent fire-and-forget
+(`.catch(() => {})` - a failed SMS mirror never fails or delays the
+underlying Notification/business operation). This makes every current
+AND future Notification type automatically SMS-enabled with zero
+additional code anywhere else in the codebase.
+
+**Forgot Password - completely replaced (not extended).** DOC-70's entire
+Manager-approval implementation (`PasswordResetRequest` model, the
+list/approve/reject Manager endpoints, the approval UI) is retired -
+recovery is now fully self-service. `POST /api/auth/forgot-password`
+still accepts `{ email, companyCode }` and ALWAYS returns one single,
+identical generic response for every possible internal outcome (no
+matching account, inactive account, no verified phone, SMS delivery
+failure, and genuine success) - stricter anti-enumeration than DOC-70's
+own two-distinct-messages behavior. On genuine success: a
+cryptographically random 12-character temporary password
+(`utils/tempPassword.js`, `crypto.randomInt`, an alphabet that excludes
+visually-ambiguous characters `0/O/1/I/l` for SMS readability) is
+generated, sent by SMS FIRST, and only on confirmed SMS success is it
+hashed and saved, `mustChangePassword` set to `true`, and every existing
+session for that account revoked (`revokeAllSessionsForUser(..., 'PASSWORD_RESET')`,
+no exception - unlike self-service change-password, there is no "current
+session" to protect here). Manager accounts are, as of Sprint 7,
+**no longer excluded** from Forgot Password (a deliberate, documented
+change from DOC-70, whose only reason for excluding Managers - "no peer
+Manager can approve a fellow Manager's reset" - no longer applies once
+approval itself is removed). Rate-limited (5 requests / 15 minutes per
+IP+email combination, `middleware/rateLimit.js`) against SMS-cost abuse.
+
+**Manager emergency reset - redesigned, not removed.** DOC-57's existing
+"Manager resets an Employee/Operator's password" endpoint
+(`PATCH /api/users/:id/reset-password`) is kept, but the Manager can no
+longer see or choose the new password at all: the request body is now
+empty, and the backend generates a temporary password server-side and
+SMS's it directly to the TARGET's own verified phone, using the exact same
+fail-safe-on-SMS-failure semantics as Forgot Password (400/502 if the
+target has no verified phone or the SMS fails - never silently succeeds
+with an undeliverable password). If the Manager's own emergency reset is
+triggered, the Manager never sees, is never sent, and never has any way to
+learn the new password.
+
+**Change Password page - label-only UX change.** The `currentPassword`
+field/backend contract is completely unchanged (it always compares
+against whatever hash is currently stored, self-chosen or SMS-delivered)
+- only the on-screen label switches to "Temporary Password" when
+`user.mustChangePassword` is true, so someone who just received a code by
+text is not confused into looking for a password they never set.
+
+**Rate limiting (`middleware/rateLimit.js`).** A simple, dependency-free,
+in-memory sliding-window limiter (no Redis - this project has no
+cache/queue infrastructure anywhere else in its stack, and a single-Node-
+process deployment, per `server.js`, does not need one). Applied to
+`/forgot-password` (5/15min per IP+email), `/verify-phone` (10/15min per
+IP+userId), and `/resend-phone-otp` (3/15min per IP+userId). Documented,
+accepted limitation: a future multi-instance deployment would need a
+shared store (Redis or similar) for this limit to be enforced globally
+rather than per-instance - out of scope for this project's current
+single-process deployment shape.
+
+**Audit Log additions.** `PASSWORD_RESET_REQUEST_APPROVED`/
+`PASSWORD_RESET_REQUEST_REJECTED` (tied to the now-retired DOC-70 flow)
+were removed from the `AuditLog` action enum; `PHONE_VERIFIED`,
+`PASSWORD_RESET_SMS_REQUESTED`, and `PASSWORD_RESET_COMPLETED` were added.
+Historical AuditLog documents using the old enum values continue to read
+back fine (Mongoose enums only validate on write, never on read).
+
+**Frontend changes.** `Register.jsx` is now a two-step page: the
+registration form (with a new required Phone Number field) followed by an
+OTP-verification step (6-digit code entry + Resend Code, calling the new
+`authApi.verifyPhone`/`authApi.resendPhoneOtp`) - no auto-login happens
+after verification, consistent with the pre-existing "verification is not
+authentication" separation. `ForgotPassword.jsx`'s copy no longer mentions
+Manager review. `ChangePassword.jsx` shows "Temporary Password" instead of
+"Current Password" when `mustChangePassword` is true. `Profile.jsx`
+displays the masked phone number and a verified/unverified status message
+(System Admin shows "Not applicable" instead, since it has no phone
+concept at all). `ManagerFormFields.jsx` (shared by
+`CreateOrganizationForm`/`OrganizationCard`'s Assign/Replace Manager
+actions) gained a required Manager Phone field, gated by the same
+`showPassword` boolean the password field already uses - Edit Manager
+never collects it, since editing an existing Manager's profile never
+touches phone any more than it touches password.
+`OrganizationUserRow.jsx`'s "Reset Password" action is now a simple
+confirm/cancel step ("Send Temporary Password") with no password inputs
+at all, matching the backend's redesigned, Manager-blind reset flow.
+`PasswordResetRequestsPanel.jsx` and `backend/src/models/
+PasswordResetRequest.js` are both retired (dead code, no longer imported
+or routed anywhere) - see each file's own "*** RETIRED ***" header notice
+for why they could not be deleted outright in this session (see
+"Known session limitation" below) and the exact `rm` command to run once
+possible.
+
+**Test suite - written, NOT YET EXECUTED.** `backend/sprint7.e2e.test.tmp.js`
+is a complete, ready-to-run test harness following this project's own
+established `docNN.e2e.test.tmp.js` convention (temporary, deleted after
+its run is recorded here) - it boots the real Express app in-process,
+talks to it over real HTTP, and exercises: phone-number
+normalization/masking edge cases; the reset script's read-only helpers
+(`assertExactlyOneSystemAdmin`/`countAll`, never `main()`); registration
+with a required phone (success, duplicate email, duplicate phone, missing
+phone); the login phone-verification gate; OTP verify/resend/expiry/
+lockout/one-time-use; rate limiting on resend; Notification-to-SMS
+mirroring; Forgot Password's generic response across every outcome
+(unknown account, Manager account now-included, deactivated account);
+the full temp-password-login-then-forced-change flow; the Manager
+emergency reset's redesigned no-body/target-only-SMS behavior; Manager
+creation with a required phone (missing phone, valid phone, duplicate
+phone across organizations); and a dedicated attack section (stale JWT
+revoked after a password reset, expired-but-correct OTP, OTP brute-force
+lockout, guessing another user's OTP, cross-organization phone reuse,
+role/organizationId spoofing attempts in the registration body, and a
+deactivated account being fully inert under Forgot Password). It uses two
+necessary testing techniques, both documented in its own header comment:
+minting a real session/JWT for the existing System Admin account to reach
+System-Admin-only endpoints without ever knowing or touching that
+account's real password, and wrapping `sms.service.js`'s own `sendSms`
+(before the app is required, so every module's own reference picks up the
+wrapper via Node's module cache) to capture the plaintext OTP/temporary
+password a real phone would receive, since neither value is ever
+recoverable from the database by design. **This script could not actually
+be run in this session** - see "Known session limitation" below - and
+must be executed (`node sprint7.e2e.test.tmp.js` from `backend/`) before
+this ticket can be considered verified; it is written to clean up every
+fixture it creates and to leave the real database exactly as it found it.
+
+**Regression.** No route, controller, or model outside the files listed
+above (this section, and the git-status list in the final report) was
+touched. Every pre-existing DOC-31 through DOC-77 feature's own request/
+response shapes are unchanged except the three deliberate, documented
+Sprint 7 additions to `sanitizeUser` (`phoneNumberMasked`,
+`phoneVerificationStatus`) and to `login`'s 403 gate - both strictly
+additive to existing response shapes, never a removal or rename of an
+existing field. This could only be confirmed by static code review (grep/
+read) in this session, not by an actual test run or `npm run build` - see
+"Known session limitation" below.
+
+**Known session limitation - shell/build access was unavailable.** A
+Windows-update-induced infrastructure issue (unrelated to this ticket)
+made the sandboxed shell used to run `npm`/`node` commands unavailable for
+this entire ticket's implementation. Per explicit instruction, every file
+in this section was written and edited directly and completely, but
+`npm run build` (frontend), the tenant reset script's own `--dry-run`,
+and `sprint7.e2e.test.tmp.js` could not actually be executed or verified
+in this session. All three must be run manually (or once shell access is
+restored) before this ticket is truly complete: `cd frontend && npm run
+build`; `cd backend && npm run reset:tenant-data:dry-run` (safe, read-only,
+recommended before ever running the real reset); `cd backend && node
+sprint7.e2e.test.tmp.js` (then delete that file and update this section
+with the real pass/fail counts, exactly like every prior ticket's own
+harness).
+
+**Production Tenant Reset Procedure (manual, one-time, explicit only).**
+1. Back up the production database first (this project has no built-in
+   backup/restore tooling - use your MongoDB hosting provider's own
+   snapshot/export feature). 2. Run `npm run reset:tenant-data:dry-run`
+   and review the printed counts - this step deletes nothing. 3. Only once
+   the dry-run output has been reviewed and confirmed correct, run
+   `CONFIRM_TENANT_RESET=YES npm run reset:tenant-data` (setting the
+   variable inline for that one command only, never saved permanently in
+   `.env`). 4. Immediately verify exactly one System Admin account can
+   still sign in. This procedure is never triggered by deployment, CI, or
+   any code path `npm start` touches - it is a human, typed, one-time
+   command, exactly as the task's own standing constraint requires.
+
+**Git status summary.** Backend: new
+`utils/phoneNumber.js`/`utils/tempPassword.js`/`utils/otp.js`,
+`models/PhoneVerificationChallenge.js`/`models/SmsDelivery.js`,
+`services/sms.service.js`/`services/phoneVerification.service.js`,
+`middleware/rateLimit.js`, `scripts/resetTenantData.js`,
+`sprint7.e2e.test.tmp.js` (temporary); modified
+`models/User.js`/`models/Notification.js`/`models/AuditLog.js`/
+`models/UserSession.js` (comment only), `scripts/seedSystemAdmin.js`,
+`services/notification.service.js`, `controllers/auth.controller.js`/
+`controllers/user.controller.js`/`controllers/organization.controller.js`,
+`routes/auth.routes.js`/`routes/user.routes.js`, `package.json`,
+`.env.example`; retired-in-place (not deleted - see above)
+`models/PasswordResetRequest.js`. Frontend: modified
+`services/api.js`, `pages/Register.jsx`/`ForgotPassword.jsx`/
+`ChangePassword.jsx`/`Profile.jsx`/`ManagerDashboard.jsx`,
+`components/ManagerFormFields.jsx`/`CreateOrganizationForm.jsx`/
+`OrganizationCard.jsx`/`OrganizationUserRow.jsx`, `utils/validation.js`;
+retired-in-place `components/PasswordResetRequestsPanel.jsx`.
+
+**Confirmations:** no production data was deleted; the destructive tenant
+reset command was never executed; no SMS provider credential is
+hardcoded; no plaintext password, temporary password, OTP, or JWT was
+ever logged; organization isolation is unchanged; nothing was committed;
+nothing was pushed; no Jira/task-tracker item was marked Done
+automatically.

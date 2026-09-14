@@ -79,7 +79,13 @@ const REVOKE_REASONS = [
   'LOGOUT_OTHERS', // POST /api/auth/sessions/logout-others
   'LOGOUT_ALL', // POST /api/auth/sessions/logout-all (includes current)
   'PASSWORD_CHANGED', // self-service change-password (DOC-57 Flow A)
-  'PASSWORD_RESET', // Manager reset or DOC-70-approved reset (DOC-57 Flow B / DOC-70)
+  'PASSWORD_RESET', // Manager emergency reset (DOC-57 Flow B) or the Sprint 7
+  // self-service, SMS-delivered temporary password (controllers/
+  // auth.controller.js's `forgotPassword`) - DOC-70's original Manager-
+  // approval flow that also used this same reason has been retired (see
+  // models/PasswordResetRequest.js), but the reason itself is unchanged:
+  // it still always means "this account's password was reset by someone/
+  // something other than the account owner's own in-session choice."
   'USER_DEACTIVATED', // Manager deactivation (DOC-48/DOC-50)
 ];
 
