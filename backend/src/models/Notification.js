@@ -99,19 +99,18 @@ const NOTIFICATION_TYPES = [
   'REQUEST_RESOLVED',
   'REQUEST_REOPENED',
   'REQUEST_CANCELLED',
-  // DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
-  // System-generated (task spec section 38 item 5's own documented
-  // forward-compatibility case, used here for the first time): the public
-  // forgot-password endpoint has no authenticated caller, so `actorId` is
-  // always `null` for this type - never a user "notifying themselves".
-  // `requestId` is also always `null` for this type (it is a
-  // PasswordResetRequest, not a Request - a different model entirely; its
-  // id lives in `metadata.passwordResetRequestId` instead, so this
-  // Request-typed reference field is never repurposed for a different
-  // collection). Sent to every Manager in the requesting User's own
-  // Organization - see services/notification.service.js's own DOC-70 call
-  // site for the full recipient-selection rationale.
-  'PASSWORD_RESET_REQUESTED',
+  // DOC-70's original 'PASSWORD_RESET_REQUESTED' type (Manager-approval
+  // Forgot Password) was REMOVED here by Sprint 7 - "SMS + Phone
+  // Authentication Upgrade", which replaces that entire flow with a
+  // self-service, SMS-delivered temporary password (see controllers/
+  // auth.controller.js's `forgotPassword` and backend/README.md's Sprint
+  // 7 section for the full replacement rationale). Nothing in this
+  // project creates a notification of this old type anymore - it is
+  // deliberately not kept as a dead enum value (task spec: "Do not leave
+  // dead routes/UI"). A historical document with this value (from before
+  // this upgrade) would still READ back fine - Mongoose's `enum` only
+  // validates on write, never on read - but no new one can ever be
+  // created.
   // DOC-72 - "@Mentions in Organization Chat". `requestId` is always
   // `null` for this type (a chat message is not a Request - a different
   // model entirely; its id lives in `metadata.chatMessageId` instead, the

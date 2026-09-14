@@ -12,9 +12,6 @@ const {
   updateUserStatus,
   updateUserSpecialties,
   resetUserPassword,
-  listPasswordResetRequests,
-  approvePasswordResetRequest,
-  rejectPasswordResetRequest,
 } = require('../controllers/user.controller');
 const {
   uploadMyProfileImage,
@@ -145,21 +142,18 @@ router.patch('/:id/status', updateUserStatus);
 // updateUserSpecialties in user.controller.js for the complete
 // validation/isolation rules.
 router.patch('/:id/specialties', updateUserSpecialties);
-// DOC-57 - Flow B, "Manager Password Reset" - see resetUserPassword in
-// user.controller.js for the complete authorization/target-protection/
-// inactive-user-policy rules.
+// DOC-57 - Flow B, "Manager Password Reset". Sprint 7 - "SMS + Phone
+// Authentication Upgrade" REWROTE this endpoint's own behavior (see
+// resetUserPassword/performPasswordReset in user.controller.js): the
+// Manager no longer supplies a password at all - a secure temporary
+// password is generated server-side and sent by SMS to the target's own
+// verified phone. Route/middleware chain unchanged.
 router.patch('/:id/reset-password', resetUserPassword);
 
-// DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
-// All three share this router's own blanket Manager/own-Organization/
-// active-Organization chain above - no additional middleware needed.
-// Three-segment paths (`/password-reset-requests/:id/approve` etc.) can
-// never collide with the one-segment `/:id` PATCH route above regardless
-// of registration order (Express matches by exact segment count), the
-// same non-collision guarantee this project's other routers already rely
-// on for analogous shapes.
-router.get('/password-reset-requests', listPasswordResetRequests);
-router.patch('/password-reset-requests/:id/approve', approvePasswordResetRequest);
-router.patch('/password-reset-requests/:id/reject', rejectPasswordResetRequest);
+// DOC-70's three /password-reset-requests* routes (Manager-approval
+// Forgot Password review queue) have been REMOVED by Sprint 7 - "SMS +
+// Phone Authentication Upgrade" - see models/PasswordResetRequest.js's
+// own retirement notice. Forgot Password is now fully self-service
+// (POST /api/auth/forgot-password) with no Manager review step.
 
 module.exports = router;

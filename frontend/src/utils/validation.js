@@ -16,3 +16,13 @@ export const MIN_PASSWORD_LENGTH = 6;
 // fast client-side feedback - the backend remains the sole authority and
 // re-validates independently regardless.
 export const MAX_PASSWORD_LENGTH = 128;
+// Sprint 7 - "SMS + Phone Authentication Upgrade". A deliberately loose,
+// client-side-only "does this look like a phone number" check - fast
+// feedback only, same spirit as EMAIL_REGEX above. The backend's
+// utils/phoneNumber.js (normalizePhoneNumber/isValidE164) is the sole real
+// authority: it normalizes to E.164 (adding the default country code when
+// missing, stripping a leading trunk "0", etc.) and is what actually
+// decides whether a number is accepted - this regex only exists so a user
+// gets an inline error before a round trip for obviously-wrong input like
+// letters or an empty string.
+export const PHONE_REGEX = /^[0-9+()\-\s]{7,20}$/;

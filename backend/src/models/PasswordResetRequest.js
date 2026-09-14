@@ -1,6 +1,33 @@
 const mongoose = require('mongoose');
 
 /**
+ * *** RETIRED - Sprint 7 "SMS + Phone Authentication Upgrade" ***
+ * This entire model/flow (DOC-70's Manager-approval Forgot Password) has
+ * been REPLACED by a self-service, SMS-delivered temporary password (see
+ * controllers/auth.controller.js's `forgotPassword` and backend/
+ * README.md's Sprint 7 section for the full rationale). Nothing in this
+ * codebase requires this file anymore as of Sprint 7:
+ *   - controllers/auth.controller.js no longer creates a
+ *     PasswordResetRequest document.
+ *   - controllers/user.controller.js no longer exports
+ *     listPasswordResetRequests/approvePasswordResetRequest/
+ *     rejectPasswordResetRequest.
+ *   - routes/user.routes.js no longer mounts the three
+ *     /password-reset-requests* endpoints.
+ *   - frontend/src/components/PasswordResetRequestsPanel.jsx and its
+ *     ManagerDashboard.jsx usage have been removed.
+ * This file is left ON DISK, UNUSED, rather than deleted, purely because
+ * the sandboxed shell available during this Sprint 7 implementation was
+ * down (a documented, unrelated infrastructure outage - see this ticket's
+ * own final report) and no other tool in this environment can delete a
+ * file. It is safe to delete once shell access is available:
+ *   rm backend/src/models/PasswordResetRequest.js
+ * It is never `require()`d by any file in this project as of this
+ * change - confirmed by this ticket's own post-implementation re-audit
+ * (backend/README.md's Sprint 7 section, git hygiene item).
+ * -------------------------------------------------------------------------
+ * ORIGINAL DOC-70 DOCUMENTATION BELOW (retained for historical context only)
+ * -------------------------------------------------------------------------
  * DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
  * -------------------------------------------------------------------------
  *

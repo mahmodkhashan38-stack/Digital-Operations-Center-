@@ -5,18 +5,25 @@ import { authApi } from '../services/api.js';
 import { EMAIL_REGEX } from '../utils/validation.js';
 import getApiErrorMessage from '../utils/apiError.js';
 
-// DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
-// This project has no email delivery (no SMTP, no third-party provider, no
-// reset links - task spec's own standing constraint) - recovery is
-// instead routed through the requesting User's own Organization Manager.
-// This page only ever submits { email, companyCode } to the backend
-// (authApi.forgotPassword) and shows whatever safe, generic status
-// message the backend returns - it never learns (and must never guess)
-// whether the account actually exists, is active, or already has a
-// pending request; the backend's own response text is displayed verbatim
-// (see auth.controller.js's forgotPassword for the full
-// enumeration-resistance contract this page deliberately does not
-// second-guess).
+// Sprint 7 - "SMS + Phone Authentication Upgrade" replaced DOC-70's
+// Manager-approval recovery flow entirely (see auth.controller.js's
+// forgotPassword - completely rewritten, not extended). This project still
+// has no email delivery (no SMTP, no third-party provider, no reset links)
+// - recovery is now self-service via SMS instead of being routed through
+// an Organization Manager: if the account exists, is active, and has a
+// VERIFIED phone number, the backend generates a secure temporary
+// password, texts it to that phone, and forces a permanent-password change
+// on next login (see ChangePassword.jsx). This page still only ever
+// submits { email, companyCode } to the backend (authApi.forgotPassword)
+// and shows whatever safe, generic status message the backend returns - it
+// never learns (and must never guess) whether the account actually exists,
+// is active, has a verified phone, or whether the SMS actually delivered;
+// the backend's own response text is displayed verbatim (see
+// auth.controller.js's forgotPassword for the full, now-even-stricter
+// enumeration-resistance contract - Sprint 7 collapsed what used to be two
+// distinct DOC-70 messages, "deactivated" vs "already pending", into one
+// single identical response for every possible outcome, including genuine
+// success - this page deliberately does not second-guess any of that).
 const COMPANY_CODE_REGEX = /^[A-Za-z0-9]{6}$/;
 
 function ForgotPassword() {
@@ -85,10 +92,17 @@ function ForgotPassword() {
         email: formData.email.trim(),
         companyCode: formData.companyCode.trim(),
       });
-      // Task spec section 19 - display the backend's own safe message
-      // verbatim, never a locally-invented one that might drift from the
-      // backend's carefully-chosen enumeration-resistant wording.
-      setSuccessMessage(response.message || 'Your password reset request has been submitted for manager review.');
+      // Sprint 7 (task spec section 19 equivalent) - display the backend's
+      // own safe message verbatim, never a locally-invented one that might
+      // drift from the backend's carefully-chosen enumeration-resistant
+      // wording. The fallback string below is only ever shown if the
+      // backend response is somehow missing its own `message` entirely -
+      // it deliberately matches the SAME generic, no-information-leaked
+      // tone as GENERIC_FORGOT_PASSWORD_MESSAGE in auth.controller.js.
+      setSuccessMessage(
+        response.message
+          || 'If an account matches those details and has a verified phone number, a temporary password has been sent by SMS.',
+      );
       setFormData({ email: '', companyCode: '' });
     } catch (error) {
       // Reached only for a genuine input-format problem (invalid
@@ -107,8 +121,8 @@ function ForgotPassword() {
       <div className="card auth-card">
         <h1>Forgot Password</h1>
         <p className="auth-subtitle">
-          Enter your email and your organization&apos;s Company Code. Your Organization Manager
-          will review the request and reset your password - no email will be sent.
+          Enter your email and your organization&apos;s Company Code. If your account has a verified phone number,
+          we&apos;ll text you a temporary password - no email will be sent, and no Manager approval is needed.
         </p>
 
         {serverError && <p className="form-error form-error-server">{serverError}</p>}
@@ -168,7 +182,7 @@ function ForgotPassword() {
                   disabled={isSubmitting}
                 />
               </div>
-              <span className="form-hint">This identifies your organization so your Manager can review the request.</span>
+              <span className="form-hint">This identifies your organization so we can find your account.</span>
               {errors.companyCode && <span className="form-error">{errors.companyCode}</span>}
             </div>
 

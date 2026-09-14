@@ -48,8 +48,74 @@
  */
 
 const Notification = require('../models/Notification');
+const User = require('../models/User');
+const { sendSms } = require('./sms.service');
 
 const NOTIFICATION_TYPES = Notification.NOTIFICATION_TYPES;
+
+// Sprint 7 - "SMS + Phone Authentication Upgrade" - Phase 6, "MIRROR
+// IN-APP NOTIFICATIONS TO SMS" / "CENTRALIZE MIRRORING". Task spec: "Do
+// NOT add sendSms() separately to every controller if avoidable. Prefer
+// central integration inside Notification service... This makes new
+// Notification types automatically SMS-enabled." This is that one
+// integration point - every existing call site (request/policy/knowledge/
+// directMessage/chat/auth controllers, confirmed by this ticket's own
+// Phase 1 audit to be the complete list) already funnels through
+// `createNotification` below, so none of them needed any change at all.
+//
+// SMS BODY = "DOC: " + the notification's own already-safe `message`
+// (task spec's own examples - "DOC: Request REQ-000123 was assigned to
+// you." - are exactly this shape). `message` is ALREADY guaranteed safe
+// by models/Notification.js's own documented contract (never sensitive
+// DM content, never full policy/answer text, never a password/token) -
+// reusing it verbatim, rather than building a second, parallel per-type
+// SMS template, is what makes every CURRENT and FUTURE Notification type
+// automatically SMS-enabled with zero additional code, exactly as task
+// spec Phase 6 asks for. Truncated defensively to SMS_MAX_MESSAGE_LENGTH
+// even though Notification.message is already schema-capped at 500 chars,
+// purely to bound real-world SMS segment/cost concerns (see backend/
+// README.md's own "SMS cost considerations" section).
+const SMS_MAX_MESSAGE_LENGTH = 300;
+
+function buildSmsBodyForNotification(notification) {
+  const raw = `DOC: ${notification.message}`;
+  return raw.length > SMS_MAX_MESSAGE_LENGTH
+    ? `${raw.slice(0, SMS_MAX_MESSAGE_LENGTH - 1)}…`
+    : raw;
+}
+
+// Best-effort, fire-and-forget mirror - task spec Phase 6 "SMS FAILURE
+// POLICY": "In-app Notification is PRIMARY... if SMS fails: keep in-app
+// Notification, log safe delivery failure, do not roll back application
+// operation." Called AFTER the Notification document has already been
+// durably created (see createNotification below) - never awaited by the
+// caller in a way that could make a slow/failed SMS delay or fail the
+// underlying business response, mirroring this file's own existing
+// "notification creation never blocks the business operation" contract.
+async function mirrorNotificationToSms(notification) {
+  try {
+    const recipient = await User.findById(notification.recipientId);
+    // No recipient, no verified phone (task spec Phase 6 "PHONE NOT
+    // VERIFIED" - "If recipient has no verified phone: in-app
+    // Notification still works. SMS is skipped safely"), or system_admin
+    // (never collects a phone number - see models/User.js) - a silent,
+    // safe no-op, never an error surfaced to the caller.
+    if (!recipient || recipient.phoneVerificationStatus !== 'verified' || !recipient.phoneNumber) {
+      return;
+    }
+
+    await sendSms({
+      to: recipient.phoneNumber,
+      message: buildSmsBodyForNotification(notification),
+      type: notification.type,
+      recipientUserId: recipient._id,
+      organizationId: notification.organizationId,
+    });
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error(`Failed to mirror notification to SMS (type=${notification.type}, recipientId=${notification.recipientId}):`, error.message);
+  }
+}
 
 // Creates one notification for one recipient. Never throws - every
 // failure (a bad `type`, a missing required field, a database error, a
@@ -86,7 +152,7 @@ async function createNotification({
       return null;
     }
 
-    return await Notification.create({
+    const notification = await Notification.create({
       organizationId,
       recipientId,
       actorId,
@@ -96,6 +162,15 @@ async function createNotification({
       message: message.trim(),
       metadata: metadata || {},
     });
+
+    // Sprint 7 - fire-and-forget, never awaited into the caller's own
+    // response latency/error path (task spec: SMS is best-effort for
+    // ordinary notifications - see mirrorNotificationToSms's own top
+    // comment). The in-app Notification above has already been durably
+    // created regardless of what happens here.
+    mirrorNotificationToSms(notification).catch(() => {});
+
+    return notification;
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error(`Failed to create notification (type=${type}, recipientId=${recipientId}):`, error.message);

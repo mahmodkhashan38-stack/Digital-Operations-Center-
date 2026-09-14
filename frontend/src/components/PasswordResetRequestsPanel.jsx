@@ -5,6 +5,38 @@ import { roleLabel } from '../utils/roleRoutes.js';
 import { MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH } from '../utils/validation.js';
 import getApiErrorMessage from '../utils/apiError.js';
 
+// *** RETIRED - Sprint 7 "SMS + Phone Authentication Upgrade" ***
+//
+// This entire component is DEAD CODE as of Sprint 7. It is no longer
+// imported or rendered anywhere in this app - its one caller,
+// ManagerDashboard.jsx, removed both the import and the <PasswordResetRequestsPanel />
+// render (see that file's own comment where the panel used to sit, just
+// above <AuditLogPanel isSystemAdmin={false} />).
+//
+// WHY: Sprint 7 replaced DOC-70's entire "Forgot Password / Password
+// Recovery via Manager Approval" workflow with a fully self-service,
+// SMS-based flow (see auth.controller.js's rewritten forgotPassword and
+// frontend/src/pages/ForgotPassword.jsx). There is no longer any concept
+// of a "pending password reset request" for a Manager to review, approve,
+// or reject - the backend endpoints this component called
+// (userApi.listPasswordResetRequests / approvePasswordResetRequest /
+// rejectPasswordResetRequest) have all been REMOVED from both
+// services/api.js and backend/src/controllers/user.controller.js
+// (user.routes.js's three `/password-reset-requests*` routes are gone
+// too) - every network call this file makes would now 404 even if it were
+// somehow rendered again.
+//
+// This file could not be deleted outright during this session because the
+// sandboxed shell (bash) needed to run `rm` was unavailable at the time
+// this ticket was implemented (a known, unrelated Windows-update-induced
+// infrastructure outage - see this session's own notes). Once shell
+// access is available, simply run:
+//
+//   rm frontend/src/components/PasswordResetRequestsPanel.jsx
+//
+// Nothing in this app requires this file to exist - it is left in place,
+// unused, purely because it could not yet be removed.
+//
 // DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
 // Self-contained, own fetch/loading/error/empty state - the same pattern
 // AuditLogPanel.jsx (DOC-64) already established for a Manager-Dashboard

@@ -11,7 +11,6 @@ import ManagerRequestRow from '../components/ManagerRequestRow.jsx';
 import RequestSearchControls from '../components/RequestSearchControls.jsx';
 import StatBreakdownList from '../components/StatBreakdownList.jsx';
 import AuditLogPanel from '../components/AuditLogPanel.jsx';
-import PasswordResetRequestsPanel from '../components/PasswordResetRequestsPanel.jsx';
 // DOC-69 - PRIORITY_LABELS/STATUS_LABELS now imported from
 // utils/requestLabels.js (one centralized mapping shared with
 // RequestRow.jsx/ManagerRequestRow.jsx/RequestStatusBadge.jsx) instead of
@@ -387,18 +386,23 @@ function ManagerDashboard() {
     return response.data;
   };
 
-  // DOC-57 - "Manager Password Reset". Same row-owns-pending/error/
-  // success-UI, parent-owns-token/network-access split every other
-  // mutating action on this page already uses. `payload` is always
-  // exactly { newPassword, confirmPassword } (OrganizationUserRow.jsx
-  // never sends anything else). The response replaces this user in
-  // `users` state the same way every other user-mutation here does - its
+  // DOC-57 - "Manager Password Reset", redesigned by Sprint 7 - "SMS +
+  // Phone Authentication Upgrade" (task spec Phase 12 "MANAGER RESET
+  // FLOW"). Same row-owns-pending/error/success-UI, parent-owns-token/
+  // network-access split every other mutating action on this page already
+  // uses, but the Manager no longer types or sees a new password at all -
+  // there is nothing left to send in the request body. Triggering this
+  // action tells the backend to generate a temporary password server-side
+  // and SMS it directly to the target user's own verified phone number
+  // (see user.controller.js's performPasswordReset) - the Manager never
+  // learns what it is. The response still replaces this user in `users`
+  // state the same way every other user-mutation here does - its
   // `mustChangePassword` is now `true`, which is all this page needs to
   // reflect (there is no dedicated "pending password change" badge in
-  // this table; the row itself never displays the new password, per task
-  // spec).
-  const handleResetPassword = async (targetUser, payload) => {
-    const response = await userApi.resetPassword(targetUser.id, payload, token);
+  // this table; the row itself never displayed the new password even
+  // before this redesign, per task spec).
+  const handleResetPassword = async (targetUser) => {
+    const response = await userApi.resetPassword(targetUser.id, token);
     setUsers((prev) => (prev || []).map((u) => (u.id === targetUser.id ? response.data : u)));
     return response.data;
   };
@@ -1236,7 +1240,7 @@ function ManagerDashboard() {
                 - see request.controller.js's getOrganizationRequestStatistics,
                 which folds this in exactly the way DOC-55's own `sla` block
                 was added there) - no separate fetch/loading state needed
-                here, unlike PasswordResetRequestsPanel/AuditLogPanel below.
+                here, unlike AuditLogPanel below.
                 `averageScore` is `null` (never a fake `0`/`0.0`) when no
                 Request has been rated yet - shown as "N/A", the same
                 "N/A rather than fake 0.0" convention this Organization's
@@ -1286,11 +1290,16 @@ function ManagerDashboard() {
           </>
         )}
 
-        {/* DOC-70 - "Forgot Password / Password Recovery via Manager
-            Approval". Self-contained panel (owns its own fetch/loading/
-            error/empty state), placed ahead of the Audit Log so a Manager
-            sees pending review items before scrolling to history. */}
-        <PasswordResetRequestsPanel />
+        {/* DOC-70's "Forgot Password / Password Recovery via Manager
+            Approval" panel used to render here. Sprint 7 - "SMS + Phone
+            Authentication Upgrade" retired that entire approval workflow -
+            recovery is now fully self-service via SMS (see
+            ForgotPassword.jsx), so there is nothing left for a Manager to
+            review or act on, and this panel/import has been removed
+            (see components/PasswordResetRequestsPanel.jsx's own
+            retirement notice - it could not be deleted outright due to
+            this session's tooling limits, but is dead code, imported and
+            rendered nowhere). */}
 
         {/* DOC-64 - "Audit Log". Manager-only, own Organization - the
             backend (routes/auditLog.routes.js) is the real boundary; this

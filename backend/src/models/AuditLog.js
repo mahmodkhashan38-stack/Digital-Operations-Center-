@@ -122,22 +122,39 @@ const AUDIT_ACTIONS = [
   'ORGANIZATION_SETTINGS_UPDATED',
   // Self-service Profile (any role, DOC-62)
   'PROFILE_UPDATED',
-  // DOC-70 - "Forgot Password / Password Recovery via Manager Approval".
-  // Recorded IN ADDITION TO (never instead of) the existing
-  // USER_PASSWORD_RESET entry `performPasswordReset` already writes for
-  // every password reset, self-service-requested or not - that entry
-  // documents "a password was reset"; these two document "a specific
-  // pending PasswordResetRequest was reviewed" (which request, resolved
-  // when, by which Manager) - a genuinely different fact, not a duplicate
-  // (task spec section 16: "Do not duplicate meaningless entries" - this
-  // is not meaningless, it is the only record that a self-reported
-  // request was ever formally closed out). Creating the PasswordResetRequest
-  // itself is NOT audit-logged - it is a public, pre-authentication action
-  // with no actor to attribute it to, and the PasswordResetRequest
-  // document itself is already the durable, timestamped record of that
-  // event (see that model's own top comment).
-  'PASSWORD_RESET_REQUEST_APPROVED',
-  'PASSWORD_RESET_REQUEST_REJECTED',
+  // DOC-70's original 'PASSWORD_RESET_REQUEST_APPROVED'/'_REJECTED'
+  // actions (Manager-approval Forgot Password) were REMOVED here by
+  // Sprint 7 - "SMS + Phone Authentication Upgrade", which deletes the
+  // entire PasswordResetRequest/Manager-approval flow in favor of a
+  // self-service, SMS-delivered temporary password. See this ticket's own
+  // three new actions below, which replace them.
+  // Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec Phase 13,
+  // "AUDIT LOG" - safe security-event actions only, never the OTP/
+  // temporary password/SMS body itself; `changes` is always `null` for
+  // all three, the same "no safe from/to for a secret" reasoning
+  // USER_PASSWORD_RESET above already established).
+  //   PHONE_VERIFIED - a phone number successfully completed OTP
+  //     verification (self-service registration, or a System-Admin-
+  //     created Manager completing their own first-login verification).
+  //     `actorId` is the account owner themselves (this is a self-action,
+  //     not something done TO them by an admin/manager).
+  //   PASSWORD_RESET_SMS_REQUESTED - a Forgot Password request actually
+  //     resulted in a temporary password being generated and sent by SMS
+  //     (never logged for a request that was silently no-op'd for
+  //     anti-enumeration reasons - see auth.controller.js's own
+  //     forgotPassword comment). `actorId` is the account owner - this is
+  //     a public, pre-authentication endpoint, so this is one of the very
+  //     few AuditLog entries whose actor is also its own target (task
+  //     spec's own "no system-generated audit event in this version"
+  //     constraint on the schema's `actorId` being `required` still
+  //     holds: this event always has a real, if self-directed, actor).
+  //   PASSWORD_RESET_COMPLETED - the user successfully logged in with the
+  //     temporary password and completed the forced Change Password step
+  //     (recorded by the EXISTING changePassword flow - see
+  //     auth.controller.js - never a new endpoint of its own).
+  'PHONE_VERIFIED',
+  'PASSWORD_RESET_SMS_REQUESTED',
+  'PASSWORD_RESET_COMPLETED',
   // DOC-69 - "Login History & Active Sessions" (task spec section 26).
   // Deliberately NOT one entry per ordinary self-service session action
   // (login, logout, "log out this session", "log out others") - those are
