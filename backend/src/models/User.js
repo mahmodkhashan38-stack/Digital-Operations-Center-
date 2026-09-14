@@ -247,77 +247,61 @@ const userSchema = new mongoose.Schema({
     type: profileImageSchema,
     default: null,
   },
-  // Sprint 7 - "SMS + Phone Authentication Upgrade". Always stored in
-  // normalized E.164 form (see utils/phoneNumber.js's own
-  // normalizePhoneNumber - the ONE place raw user input is ever converted
-  // to this shape; nothing writes to this field with anything else).
-  // `null` for system_admin (never required - see phoneVerificationStatus
-  // below) and for any account that predates this ticket (no migration is
-  // run automatically - see the tenant reset script, scripts/
-  // resetTenantData.js, which is the documented path to a clean,
-  // fully-phone-verified user base). Deliberately NOT `unique: true` here
-  // directly - see the partial unique index below, which only enforces
-  // uniqueness for a real, verified, non-null number (task spec Phase 3
-  // "PHONE UNIQUENESS" - "Add an appropriate unique index for verified/
-  // non-null numbers").
-  phoneNumber: {
-    type: String,
-    trim: true,
-    default: null,
-  },
-  // Set the instant a phone number successfully completes OTP
-  // verification (services/phoneVerification.service.js's own
-  // `verifyChallenge`). `null` while unverified/never verified - the same
-  // "null means not yet true" convention `readAt`/`phoneVerifiedAt`'s
-  // sibling fields elsewhere in this project already use. Never set
+  // EMAIL AUTHENTICATION & NOTIFICATION UPGRADE - replaces Sprint 7's
+  // phone/SMS verification model (retired - see git history / this
+  // model's own prior "SMS + Phone Authentication Upgrade" fields, and
+  // backend/README.md's "Email Authentication & Notification Upgrade"
+  // section for the full replacement rationale). Every new employee/
+  // manager/operator account must verify its EMAIL (not a phone number)
+  // before it can sign in - `phoneNumber`/`phoneVerifiedAt`/
+  // `phoneVerificationStatus` and their partial unique index have been
+  // removed entirely (task spec Phase 3: "Prefer removing Sprint-7-
+  // specific mandatory phone logic so the architecture is clean" - phone
+  // was not reused anywhere else in this project, so there was no reason
+  // to keep it as a dangling optional field). Email itself (`email`
+  // above) already has its own `unique: true` index from Sprint 1 - there
+  // is no separate "verified email" uniqueness concept the way phone
+  // needed its own partial index, since every account only ever has
+  // exactly one email and it is already guaranteed unique.
+  //
+  // Set the instant an email successfully completes OTP verification
+  // (services/emailVerification.service.js's own `verifyChallenge`).
+  // `null` while unverified/never verified - the same "null means not yet
+  // true" convention this project already uses elsewhere. Never set
   // directly by any controller - only this one service function ever
-  // writes it, alongside `phoneVerificationStatus` below, in the same
+  // writes it, alongside `emailVerificationStatus` below, in the same
   // save().
-  phoneVerifiedAt: {
+  emailVerifiedAt: {
     type: Date,
     default: null,
   },
-  // Explicit tri-state status (task spec Phase 3: "Possibly:
-  // phoneVerificationStatus") rather than inferring verification purely
-  // from `phoneVerifiedAt !== null` - an explicit enum makes the
-  // "currently mid-verification, OTP already sent" state a first-class,
-  // queryable fact (used by middleware/requirePhoneVerified.js-equivalent
-  // login gate in auth.controller.js) without having to also cross-
-  // reference PhoneVerificationChallenge just to answer "can this account
-  // log in yet?".
-  //   'not_required' - system_admin only (DOC-31's global account never
-  //     collects a phone number at all - see scripts/seedSystemAdmin.js,
-  //     unchanged by this ticket). The login gate never checks this
-  //     status for system_admin regardless (belt-and-suspenders).
+  // Explicit tri-state status (mirrors the retired `phoneVerificationStatus`
+  // shape exactly) rather than inferring verification purely from
+  // `emailVerifiedAt !== null` - an explicit enum makes "currently
+  // mid-verification, OTP already sent" a first-class, queryable fact
+  // (used by the login gate in auth.controller.js) without having to also
+  // cross-reference EmailVerificationChallenge just to answer "can this
+  // account log in yet?".
+  //   'not_required' - system_admin only (DOC-31's global account is
+  //     seeded directly and treated as already-trusted - see
+  //     scripts/seedSystemAdmin.js, which explicitly sets this value so
+  //     an existing/newly-bootstrapped System Admin is never blocked by
+  //     the login gate). The login gate never checks this status for
+  //     system_admin regardless (belt-and-suspenders).
   //   'pending' - the default for every new employee/manager/operator
-  //     account: a phone number has been supplied and an OTP challenge
-  //     has been (or is about to be) issued, but not yet confirmed. Login
-  //     is blocked while in this state (task spec: "Do not allow an
-  //     unverified phone to become a fully active account").
+  //     account: an OTP challenge has been (or is about to be) issued to
+  //     this account's own email, but not yet confirmed. Login is blocked
+  //     while in this state (task spec: "Login is blocked until email
+  //     verification succeeds").
   //   'verified' - OTP confirmed; login is allowed (subject to every
   //     other existing check - isActive, correct password, etc.,
   //     completely unchanged).
-  phoneVerificationStatus: {
+  emailVerificationStatus: {
     type: String,
     enum: ['not_required', 'pending', 'verified'],
     default: 'pending',
   },
 });
-
-// Sprint 7 - "PHONE UNIQUENESS" (task spec Phase 3, recommended: yes).
-// A partial unique index, the same pattern this file's own
-// "at most one system_admin" index above already uses: only applies to
-// documents where phoneNumber is a non-null string, so `null` (every
-// system_admin, and every not-yet-phone-verified legacy account) never
-// collides with another `null`, and only a genuine duplicate REAL number
-// is rejected at the database level. Application-level duplicate
-// handling (a clear 409, not a raw Mongo error) lives in
-// services/phoneVerification.service.js/controllers/auth.controller.js -
-// this index is the backstop, not the primary UX.
-userSchema.index(
-  { phoneNumber: 1 },
-  { unique: true, partialFilterExpression: { phoneNumber: { $type: 'string' } } },
-);
 
 // Enforces "at most one system_admin" at the database level, not just in
 // application code. A partial unique index only applies to documents

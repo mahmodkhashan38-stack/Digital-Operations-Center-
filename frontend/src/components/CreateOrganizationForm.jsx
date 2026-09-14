@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import ManagerFormFields from './ManagerFormFields.jsx';
-import { EMAIL_REGEX, MIN_PASSWORD_LENGTH, PHONE_REGEX } from '../utils/validation.js';
+import { EMAIL_REGEX, MIN_PASSWORD_LENGTH } from '../utils/validation.js';
 
-const EMPTY_MANAGER = { fullName: '', email: '', password: '', phoneNumber: '' };
+const EMPTY_MANAGER = { fullName: '', email: '', password: '' };
 
 // Form for System Admin to create a new Organization (DOC-32), optionally
 // creating its initial Manager in the same request (DOC-34). Only ever
@@ -44,14 +44,6 @@ function CreateOrganizationForm({ onCreate, onCancel }) {
       } else if (manager.password.length < MIN_PASSWORD_LENGTH) {
         nextErrors.password = `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
       }
-      // Sprint 7: Manager phone is now required at creation time - the
-      // Manager cannot sign in at all until it is verified (see
-      // auth.controller.js's login() phone-verification gate).
-      if (!manager.phoneNumber.trim()) {
-        nextErrors.phoneNumber = 'Manager phone number is required.';
-      } else if (!PHONE_REGEX.test(manager.phoneNumber.trim())) {
-        nextErrors.phoneNumber = 'Please enter a valid phone number.';
-      }
     }
 
     return nextErrors;
@@ -73,7 +65,6 @@ function CreateOrganizationForm({ onCreate, onCancel }) {
         fullName: manager.fullName.trim(),
         email: manager.email.trim(),
         password: manager.password,
-        phoneNumber: manager.phoneNumber.trim(),
       };
     }
 

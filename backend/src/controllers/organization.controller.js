@@ -16,12 +16,12 @@ const { validatePassword } = require('../utils/passwordPolicy');
 // these calls touch RequestActivity/Notification, and this controller has
 // no Request-related logic to begin with.
 const { recordAuditLog } = require('../services/auditLog.service');
-// Sprint 7 - "SMS + Phone Authentication Upgrade" (task spec Phase 4
-// "MANAGER CREATION" - "System Admin enters: Manager name, Manager email,
-// Manager phone... Do not bypass verification simply because System Admin
-// created the user").
-const { normalizePhoneNumber, isValidE164 } = require('../utils/phoneNumber');
-const phoneVerificationService = require('../services/phoneVerification.service');
+// DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE - "MANAGER CREATION"
+// ("System Admin enters: Manager name, Manager email, Manager password...
+// Do not bypass verification simply because System Admin created the
+// user"). Replaces the retired Sprint 7 phone-based Manager creation (see
+// git history) - the new Manager verifies their own EMAIL instead.
+const emailVerificationService = require('../services/emailVerification.service');
 
 const MIN_NAME_LENGTH = 2;
 const MAX_NAME_LENGTH = 100;
@@ -287,12 +287,13 @@ const duplicateKeyMessage = (error) => {
 // inline copy of a length check - the two (three, four) can never drift
 // apart from each other.
 const validateManagerInput = (input) => {
-  const { fullName, email, password, phoneNumber } = input || {};
+  const { fullName, email, password } = input || {};
 
-  // Sprint 7 - phoneNumber is now required alongside the three pre-
-  // existing fields (task spec Phase 4 "MANAGER CREATION").
-  if (!fullName || !email || !password || !phoneNumber) {
-    return 'fullName, email, password and phoneNumber are all required for the Organization manager.';
+  // DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE - the retired Sprint 7
+  // mandatory phoneNumber requirement has been removed (see git history).
+  // Only these three fields are required for the Organization manager.
+  if (!fullName || !email || !password) {
+    return 'fullName, email and password are all required for the Organization manager.';
   }
   if (typeof fullName !== 'string' || fullName.trim().length === 0) {
     return 'fullName is required for the Organization manager.';
@@ -303,9 +304,6 @@ const validateManagerInput = (input) => {
   const passwordFormatError = validatePassword(password);
   if (passwordFormatError) {
     return `Manager ${passwordFormatError.charAt(0).toLowerCase()}${passwordFormatError.slice(1)}`;
-  }
-  if (!isValidE164(normalizePhoneNumber(phoneNumber))) {
-    return 'Please provide a valid phone number for the Organization manager.';
   }
   return null;
 };
@@ -336,14 +334,8 @@ async function createAndLinkManager(organization, managerInput) {
     throw new OrganizationError(400, validationError);
   }
 
-  const { fullName, email, password, phoneNumber } = managerInput;
+  const { fullName, email, password } = managerInput;
   const normalizedEmail = email.toLowerCase().trim();
-  // Sprint 7 - validateManagerInput above already confirmed this
-  // normalizes to a valid E.164 value; re-normalizing here (rather than
-  // trusting the validator's own side-effect-free check) keeps this
-  // function correct even if called with a value that was validated
-  // slightly earlier by a different caller.
-  const normalizedPhoneNumber = normalizePhoneNumber(phoneNumber);
 
   const existingUser = await User.findOne({ email: normalizedEmail });
   if (existingUser) {
@@ -351,12 +343,6 @@ async function createAndLinkManager(organization, managerInput) {
       409,
       'A user with this email already exists. The Organization manager must be a new account.',
     );
-  }
-  // Sprint 7 - task spec Phase 3 "PHONE UNIQUENESS" applies to every role,
-  // including a Manager created through this path.
-  const existingPhoneUser = await User.findOne({ phoneNumber: normalizedPhoneNumber });
-  if (existingPhoneUser) {
-    throw new OrganizationError(409, 'A user with this phone number already exists.');
   }
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
@@ -369,21 +355,16 @@ async function createAndLinkManager(organization, managerInput) {
       passwordHash,
       role: 'manager',
       organizationId: organization._id,
-      // Sprint 7 - a System-Admin-created Manager still starts
-      // 'pending' - task spec Phase 4: "Do not bypass verification simply
-      // because System Admin created the user unless explicitly
-      // justified." No justification applies here, so none is granted:
-      // the new Manager verifies their own phone via POST
-      // /api/auth/verify-phone (the exact same public endpoint
+      // DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE - a System-Admin-
+      // created Manager still starts 'pending' ("Do not bypass
+      // verification simply because System Admin created the user unless
+      // explicitly justified"). No justification applies here, so none is
+      // granted: the new Manager verifies their own email via POST
+      // /api/auth/verify-email (the exact same public endpoint
       // registration uses) before their very first login.
-      phoneNumber: normalizedPhoneNumber,
-      phoneVerificationStatus: 'pending',
     });
   } catch (error) {
     if (error.code === 11000) {
-      if (error.keyPattern && error.keyPattern.phoneNumber) {
-        throw new OrganizationError(409, 'A user with this phone number already exists.');
-      }
       throw new OrganizationError(
         409,
         'A user with this email already exists. The Organization manager must be a new account.',
@@ -395,19 +376,19 @@ async function createAndLinkManager(organization, managerInput) {
     throw error;
   }
 
-  // SECURITY-CRITICAL SMS FAILURE (task spec Phase 5) - if the OTP cannot
-  // be sent, the just-created Manager account is rolled back rather than
-  // left in a permanently-unverifiable-and-therefore-permanently-unusable
-  // state, exactly like `register`'s own identical rollback in
+  // SECURITY-CRITICAL EMAIL FAILURE - if the OTP cannot be sent, the
+  // just-created Manager account is rolled back rather than left in a
+  // permanently-unverifiable-and-therefore-permanently-unusable state,
+  // exactly like `register`'s own identical rollback in
   // controllers/auth.controller.js.
-  const challengeResult = await phoneVerificationService.issueChallenge({
+  const challengeResult = await emailVerificationService.issueChallenge({
     userId: manager._id,
-    phoneNumber: normalizedPhoneNumber,
+    email: normalizedEmail,
     organizationId: organization._id,
   });
   if (!challengeResult.success) {
     await User.deleteOne({ _id: manager._id }).catch((cleanupError) => {
-      console.error('Failed to roll back manager after phone verification SMS failure:', cleanupError.message);
+      console.error('Failed to roll back manager after email verification failure:', cleanupError.message);
     });
     throw new OrganizationError(502, challengeResult.error);
   }

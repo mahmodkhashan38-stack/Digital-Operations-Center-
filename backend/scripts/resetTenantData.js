@@ -7,9 +7,9 @@
  * Wipes every Organization and every non-System-Admin User, plus every
  * collection whose data only ever exists BECAUSE of one of those
  * (Requests, Chat, Direct Messages, Policies, Knowledge Board, Ratings,
- * Sessions, Service Categories, phone-verification challenges, SMS
+ * Sessions, Service Categories, email-verification challenges, email
  * delivery logs, and tenant-scoped Audit Log entries), so the platform can
- * move to the new phone-verified account model from a clean slate. See
+ * move to the email-verified account model from a clean slate. See
  * this file's own `TENANT_COLLECTIONS_DELETED` list below for the exact,
  * complete inventory - it is the single source of truth for "what this
  * script touches", cross-referenced against this ticket's own Phase 1
@@ -82,12 +82,20 @@ const AuditLog = require('../src/models/AuditLog');
 // "Delete:" inventory, so this script cleans it up regardless of the
 // fact that no live code path can ever create a new one anymore.
 const PasswordResetRequest = require('../src/models/PasswordResetRequest');
-// Sprint 7's own new tenant/user-scoped collections - orphaned the exact
-// same way UserSession/Notification would be if left behind (task spec:
-// "Audit all collections first and include anything else that would
-// otherwise become orphaned").
-const PhoneVerificationChallenge = require('../src/models/PhoneVerificationChallenge');
-const SmsDelivery = require('../src/models/SmsDelivery');
+// DOC Email Authentication & Notification Upgrade's own new tenant/
+// user-scoped collections - orphaned the exact same way UserSession/
+// Notification would be if left behind ("Audit all collections first and
+// include anything else that would otherwise become orphaned"). Replaces
+// the retired Sprint 7 PhoneVerificationChallenge/SmsDelivery requires
+// (see git history and those models' own retirement notices) - a
+// pre-existing MongoDB collection under either old name from before this
+// migration is not touched by this script (this project ships no
+// migration scripts for that - see backend/README.md's own "Migration /
+// Existing Data" note), but per this refactor's own explicit scope
+// decision ("do NOT over-engineer tenant migration... we plan to reset
+// all tenant data") this is intentionally not over-engineered further.
+const EmailVerificationChallenge = require('../src/models/EmailVerificationChallenge');
+const EmailDelivery = require('../src/models/EmailDelivery');
 
 const requestImageStorage = require('../src/services/requestImageStorage');
 const profileImageStorage = require('../src/services/profileImageStorage');
@@ -124,7 +132,7 @@ const TENANT_COLLECTIONS_DELETED = [
   'Comment', 'Notification', 'UserSession (non-system_admin)', 'ChatMessage',
   'DirectMessage', 'DirectMessageConversation', 'OrganizationPolicy', 'PolicyAcknowledgement',
   'KnowledgeQuestion', 'KnowledgeAnswer', 'ServiceCategory', 'PasswordResetRequest (retired)',
-  'PhoneVerificationChallenge (non-system_admin)', 'SmsDelivery (non-system_admin)',
+  'EmailVerificationChallenge (non-system_admin)', 'EmailDelivery (non-system_admin)',
   'AuditLog (tenant-referencing entries only)',
 ];
 
@@ -175,7 +183,7 @@ async function countAll(admin) {
     organizationCount, userCount, requestCount, requestActivityCount, requestRatingCount,
     commentCount, notificationCount, sessionCount, chatMessageCount, dmCount, dmConversationCount,
     policyCount, ackCount, questionCount, answerCount, categoryCount, passwordResetRequestCount,
-    phoneChallengeCount, smsDeliveryCount, auditLogCount,
+    emailChallengeCount, emailDeliveryCount, auditLogCount,
   ] = await Promise.all([
     Organization.countDocuments({}),
     User.countDocuments(nonAdminUserFilter),
@@ -194,8 +202,8 @@ async function countAll(admin) {
     KnowledgeAnswer.countDocuments({}),
     ServiceCategory.countDocuments({}),
     PasswordResetRequest.countDocuments({}),
-    PhoneVerificationChallenge.countDocuments({ userId: { $in: nonAdminUserIds } }),
-    SmsDelivery.countDocuments({ recipientUserId: { $in: nonAdminUserIds } }),
+    EmailVerificationChallenge.countDocuments({ userId: { $in: nonAdminUserIds } }),
+    EmailDelivery.countDocuments({ recipientUserId: { $in: nonAdminUserIds } }),
     AuditLog.countDocuments(auditLogTenantFilter),
   ]);
 
@@ -221,8 +229,8 @@ async function countAll(admin) {
       KnowledgeAnswer: answerCount,
       ServiceCategory: categoryCount,
       'PasswordResetRequest (retired)': passwordResetRequestCount,
-      'PhoneVerificationChallenge (non-system_admin)': phoneChallengeCount,
-      'SmsDelivery (non-system_admin)': smsDeliveryCount,
+      'EmailVerificationChallenge (non-system_admin)': emailChallengeCount,
+      'EmailDelivery (non-system_admin)': emailDeliveryCount,
       'AuditLog (tenant-referencing entries only)': auditLogCount,
     },
   };
@@ -315,8 +323,8 @@ async function deleteEverything({
   await ServiceCategory.deleteMany({});
   await Notification.deleteMany({});
   await UserSession.deleteMany({ userId: { $in: nonAdminUserIds } });
-  await PhoneVerificationChallenge.deleteMany({ userId: { $in: nonAdminUserIds } });
-  await SmsDelivery.deleteMany({ recipientUserId: { $in: nonAdminUserIds } });
+  await EmailVerificationChallenge.deleteMany({ userId: { $in: nonAdminUserIds } });
+  await EmailDelivery.deleteMany({ recipientUserId: { $in: nonAdminUserIds } });
   await PasswordResetRequest.deleteMany({});
   await AuditLog.deleteMany(auditLogTenantFilter);
   await User.deleteMany(nonAdminUserFilter);

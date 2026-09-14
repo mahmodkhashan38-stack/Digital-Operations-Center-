@@ -49,71 +49,89 @@
 
 const Notification = require('../models/Notification');
 const User = require('../models/User');
-const { sendSms } = require('./sms.service');
+const { sendEmail } = require('./email.service');
 
 const NOTIFICATION_TYPES = Notification.NOTIFICATION_TYPES;
 
-// Sprint 7 - "SMS + Phone Authentication Upgrade" - Phase 6, "MIRROR
-// IN-APP NOTIFICATIONS TO SMS" / "CENTRALIZE MIRRORING". Task spec: "Do
-// NOT add sendSms() separately to every controller if avoidable. Prefer
-// central integration inside Notification service... This makes new
-// Notification types automatically SMS-enabled." This is that one
-// integration point - every existing call site (request/policy/knowledge/
-// directMessage/chat/auth controllers, confirmed by this ticket's own
-// Phase 1 audit to be the complete list) already funnels through
-// `createNotification` below, so none of them needed any change at all.
+// DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE - "MIRROR IN-APP
+// NOTIFICATIONS TO EMAIL" / "CENTRALIZE MIRRORING" (replaces the retired
+// Sprint 7 SMS-mirroring hook - see git history for the former
+// `mirrorNotificationToSms`/`buildSmsBodyForNotification`). "Do NOT add
+// sendEmail() separately to every controller if avoidable. Prefer central
+// integration inside Notification service... This makes new Notification
+// types automatically email-enabled." This is that one integration point
+// - every existing call site (request/policy/knowledge/directMessage/
+// chat/auth controllers) already funnels through `createNotification`
+// below, so none of them needed any change at all.
 //
-// SMS BODY = "DOC: " + the notification's own already-safe `message`
-// (task spec's own examples - "DOC: Request REQ-000123 was assigned to
-// you." - are exactly this shape). `message` is ALREADY guaranteed safe
-// by models/Notification.js's own documented contract (never sensitive
-// DM content, never full policy/answer text, never a password/token) -
-// reusing it verbatim, rather than building a second, parallel per-type
-// SMS template, is what makes every CURRENT and FUTURE Notification type
-// automatically SMS-enabled with zero additional code, exactly as task
-// spec Phase 6 asks for. Truncated defensively to SMS_MAX_MESSAGE_LENGTH
-// even though Notification.message is already schema-capped at 500 chars,
-// purely to bound real-world SMS segment/cost concerns (see backend/
-// README.md's own "SMS cost considerations" section).
-const SMS_MAX_MESSAGE_LENGTH = 300;
+// SUBJECT is a short, per-type line (concise, never the raw notification
+// title verbatim - task spec's own examples: "DOC - Request Assigned",
+// "DOC - New Direct Message", "DOC - You Were Mentioned", "DOC - New
+// Organization Policy", "DOC - New Answer to Your Question"). BODY is the
+// notification's own already-safe `message` verbatim - `message` is
+// ALREADY guaranteed safe by models/Notification.js's own documented
+// contract (never sensitive DM content, never full policy/answer text,
+// never a password/token) - reusing it verbatim, rather than building a
+// second, parallel per-type email template, is what makes every CURRENT
+// and FUTURE Notification type automatically email-enabled with zero
+// additional code.
+const EMAIL_SUBJECT_BY_TYPE = {
+  REQUEST_ASSIGNED: 'DOC - Request Assigned',
+  REQUEST_REASSIGNED: 'DOC - Request Reassigned',
+  REQUEST_UNASSIGNED: 'DOC - Request Unassigned',
+  REQUEST_STATUS_CHANGED: 'DOC - Request Status Updated',
+  REQUEST_RESOLVED: 'DOC - Request Resolved',
+  REQUEST_REOPENED: 'DOC - Request Reopened',
+  REQUEST_CANCELLED: 'DOC - Request Cancelled',
+  CHAT_MENTION: 'DOC - You Were Mentioned',
+  DIRECT_MESSAGE: 'DOC - New Direct Message',
+  POLICY_PUBLISHED: 'DOC - New Organization Policy',
+  POLICY_UPDATED: 'DOC - Organization Policy Updated',
+  KNOWLEDGE_ANSWER_ADDED: 'DOC - New Answer to Your Question',
+  KNOWLEDGE_ANSWER_ACCEPTED: 'DOC - Your Answer Was Accepted',
+};
 
-function buildSmsBodyForNotification(notification) {
-  const raw = `DOC: ${notification.message}`;
-  return raw.length > SMS_MAX_MESSAGE_LENGTH
-    ? `${raw.slice(0, SMS_MAX_MESSAGE_LENGTH - 1)}…`
-    : raw;
+function buildEmailSubjectForNotification(notification) {
+  return EMAIL_SUBJECT_BY_TYPE[notification.type] || 'DOC - New Notification';
 }
 
-// Best-effort, fire-and-forget mirror - task spec Phase 6 "SMS FAILURE
-// POLICY": "In-app Notification is PRIMARY... if SMS fails: keep in-app
-// Notification, log safe delivery failure, do not roll back application
-// operation." Called AFTER the Notification document has already been
-// durably created (see createNotification below) - never awaited by the
-// caller in a way that could make a slow/failed SMS delay or fail the
-// underlying business response, mirroring this file's own existing
-// "notification creation never blocks the business operation" contract.
-async function mirrorNotificationToSms(notification) {
+// Best-effort, fire-and-forget mirror - "EMAIL FAILURE POLICY": "In-app
+// Notification is PRIMARY... if email fails: keep in-app Notification,
+// log safe delivery failure, do not roll back application operation" (a
+// request assignment, message, policy publish, or any other business
+// action must never be rolled back by an email failure). Called AFTER
+// the Notification document has already been durably created (see
+// createNotification below) - never awaited by the caller in a way that
+// could make a slow/failed email delay or fail the underlying business
+// response, mirroring this file's own existing "notification creation
+// never blocks the business operation" contract.
+async function mirrorNotificationToEmail(notification) {
   try {
     const recipient = await User.findById(notification.recipientId);
-    // No recipient, no verified phone (task spec Phase 6 "PHONE NOT
-    // VERIFIED" - "If recipient has no verified phone: in-app
-    // Notification still works. SMS is skipped safely"), or system_admin
-    // (never collects a phone number - see models/User.js) - a silent,
-    // safe no-op, never an error surfaced to the caller.
-    if (!recipient || recipient.phoneVerificationStatus !== 'verified' || !recipient.phoneNumber) {
+    // No recipient, or an email that has not been verified yet (in-app
+    // Notification still works regardless; email mirroring is skipped
+    // safely) - a silent, safe no-op, never an error surfaced to the
+    // caller. system_admin (`emailVerificationStatus: 'not_required'`)
+    // is never a real Notification recipient in this project (every
+    // NOTIFICATION_TYPES value is Organization-scoped, and system_admin
+    // never belongs to one), but is included here defensively so a
+    // future type could safely target one without this check silently
+    // skipping it.
+    if (!recipient || (recipient.emailVerificationStatus !== 'verified' && recipient.role !== 'system_admin')) {
       return;
     }
 
-    await sendSms({
-      to: recipient.phoneNumber,
-      message: buildSmsBodyForNotification(notification),
+    await sendEmail({
+      to: recipient.email,
+      subject: buildEmailSubjectForNotification(notification),
+      text: notification.message,
       type: notification.type,
       recipientUserId: recipient._id,
       organizationId: notification.organizationId,
     });
   } catch (error) {
     // eslint-disable-next-line no-console
-    console.error(`Failed to mirror notification to SMS (type=${notification.type}, recipientId=${notification.recipientId}):`, error.message);
+    console.error(`Failed to mirror notification to email (type=${notification.type}, recipientId=${notification.recipientId}):`, error.message);
   }
 }
 
@@ -163,12 +181,12 @@ async function createNotification({
       metadata: metadata || {},
     });
 
-    // Sprint 7 - fire-and-forget, never awaited into the caller's own
-    // response latency/error path (task spec: SMS is best-effort for
-    // ordinary notifications - see mirrorNotificationToSms's own top
-    // comment). The in-app Notification above has already been durably
-    // created regardless of what happens here.
-    mirrorNotificationToSms(notification).catch(() => {});
+    // Fire-and-forget, never awaited into the caller's own response
+    // latency/error path (ordinary notification email is best-effort -
+    // see mirrorNotificationToEmail's own top comment). The in-app
+    // Notification above has already been durably created regardless of
+    // what happens here.
+    mirrorNotificationToEmail(notification).catch(() => {});
 
     return notification;
   } catch (error) {

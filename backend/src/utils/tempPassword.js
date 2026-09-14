@@ -1,22 +1,25 @@
 /**
- * Sprint 7 - "SMS + Phone Authentication Upgrade". Generates the
+ * DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE. Generates the
  * server-side, cryptographically random temporary password used by the
- * new SMS-delivered Forgot Password flow (controllers/auth.controller.js's
- * `forgotPassword`) and the Manager emergency reset flow (controllers/
- * user.controller.js's `resetUserPassword`) - see this project's own
- * standing constraint: "never supplied by Manager... never accepted from
- * frontend... only bcrypt hash stored... never logged".
+ * self-service, email-delivered Forgot Password flow (controllers/
+ * auth.controller.js's `forgotPassword`) and the Manager emergency reset
+ * flow (controllers/user.controller.js's `performPasswordReset`) - see
+ * this project's own standing constraint: "never supplied by Manager...
+ * never accepted from frontend... only bcrypt hash stored... never
+ * logged". Originally written for the now-retired Sprint 7 SMS-delivered
+ * version of this same flow (see git history) - the generator itself is
+ * unchanged, only the delivery channel (email instead of SMS) changed.
  *
  * WHY NOT JUST crypto.randomBytes(N).toString('base64')
  * Would satisfy "cryptographically secure" but can produce characters
- * (`/`, `+`, `=`) that are awkward to read aloud/re-type from an SMS on a
- * phone keypad, and can produce runs that look ambiguous at a glance
- * (`l`/`1`, `O`/`0`). This generator draws from a fixed alphabet that
- * deliberately excludes visually-ambiguous characters (the same UX
- * reasoning utils/companyCode.js's own GENERATION_ALPHABET already
- * documents), while still using `crypto.randomInt` (cryptographically
- * strong, no extra dependency) for every character choice - this is a
- * usability improvement over raw base64, not a security downgrade.
+ * (`/`, `+`, `=`) that are awkward to read/re-type, and can produce runs
+ * that look ambiguous at a glance (`l`/`1`, `O`/`0`). This generator draws
+ * from a fixed alphabet that deliberately excludes visually-ambiguous
+ * characters (the same UX reasoning utils/companyCode.js's own
+ * GENERATION_ALPHABET already documents), while still using
+ * `crypto.randomInt` (cryptographically strong, no extra dependency) for
+ * every character choice - this is a usability improvement over raw
+ * base64, not a security downgrade.
  *
  * LENGTH / STRENGTH
  * 12 characters from a 57-character alphabet is ~70 bits of entropy
@@ -41,7 +44,7 @@ const TEMP_PASSWORD_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23
  * satisfies utils/passwordPolicy.js's validatePassword() by construction
  * (fixed length well within MIN/MAX). Returns the PLAINTEXT value - the
  * caller is responsible for hashing it before persistence and sending it
- * exactly once, over SMS only, and NEVER logging/persisting/echoing it in
+ * exactly once, by email only, and NEVER logging/persisting/echoing it in
  * any response, AuditLog entry, or Notification document.
  */
 function generateTempPassword() {

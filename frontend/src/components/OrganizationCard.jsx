@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import ManagerFormFields from './ManagerFormFields.jsx';
 import StatusBadge from './StatusBadge.jsx';
-import { EMAIL_REGEX, MIN_PASSWORD_LENGTH, PHONE_REGEX } from '../utils/validation.js';
+import { EMAIL_REGEX, MIN_PASSWORD_LENGTH } from '../utils/validation.js';
 
 // DOC-42 (spec 1.B): "Created date if already available" - Organization
 // documents have had a real createdAt (via the schema's `timestamps: true`)
@@ -14,12 +14,7 @@ const formatCreatedDate = (value) => {
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 };
 
-// Sprint 7: `phoneNumber` joins this shape for Assign/Replace (brand-new
-// accounts) - EDIT continues to reuse the very same EMPTY_MANAGER shape for
-// its initial blank state but never collects/sends phoneNumber (see
-// openEditManagerForm and handleUpdateManagerProfile below, and
-// ManagerFormFields' own showPassword={false} gate on this form).
-const EMPTY_MANAGER = { fullName: '', email: '', password: '', phoneNumber: '' };
+const EMPTY_MANAGER = { fullName: '', email: '', password: '' };
 
 // Which single Manager-related form (if any) is currently open. Only one
 // at a time, ever - Assign/Edit/Replace are mutually exclusive actions on
@@ -155,13 +150,6 @@ function OrganizationCard({
     } else if (values.password.length < MIN_PASSWORD_LENGTH) {
       nextErrors.password = `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
     }
-    // Sprint 7: required for both Assign and Replace - both create a brand
-    // new Manager account that cannot sign in until its phone is verified.
-    if (!values.phoneNumber.trim()) {
-      nextErrors.phoneNumber = 'Manager phone number is required.';
-    } else if (!PHONE_REGEX.test(values.phoneNumber.trim())) {
-      nextErrors.phoneNumber = 'Please enter a valid phone number.';
-    }
     return nextErrors;
   };
 
@@ -191,7 +179,6 @@ function OrganizationCard({
         fullName: manager.fullName.trim(),
         email: manager.email.trim(),
         password: manager.password,
-        phoneNumber: manager.phoneNumber.trim(),
       });
       closeManagerForms();
     } catch (error) {
@@ -285,7 +272,6 @@ function OrganizationCard({
         fullName: replaceManagerValues.fullName.trim(),
         email: replaceManagerValues.email.trim(),
         password: replaceManagerValues.password,
-        phoneNumber: replaceManagerValues.phoneNumber.trim(),
       });
       closeManagerForms();
     } catch (error) {

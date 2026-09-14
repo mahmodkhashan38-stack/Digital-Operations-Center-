@@ -25,4 +25,16 @@ export const MAX_PASSWORD_LENGTH = 128;
 // decides whether a number is accepted - this regex only exists so a user
 // gets an inline error before a round trip for obviously-wrong input like
 // letters or an empty string.
+//
+// *** RETIRED - DOC Email Authentication & Notification Upgrade ***
+// This regex was only ever used by the Sprint 7 mandatory-phone-number
+// fields on Register.jsx, ManagerFormFields.jsx, CreateOrganizationForm.jsx
+// and OrganizationCard.jsx. All four have been updated to no longer collect
+// a phone number at all (accounts now verify by EMAIL instead), so nothing
+// in this project imports PHONE_REGEX anymore. Left in place, unused,
+// rather than deleted, only because this session's sandboxed shell (needed
+// to safely confirm zero remaining references with a real `grep -r` and
+// then `git rm`) has been unavailable. Confirmed via this app's own search
+// tools that no file references it. Safe to delete once shell access is
+// available - just remove this export.
 export const PHONE_REGEX = /^[0-9+()\-\s]{7,20}$/;
