@@ -120,26 +120,36 @@ function Login() {
       // middleware is what actually blocks every normal route afterward.
       navigate(postLoginDestination(loggedInUser));
     } catch (error) {
-      // EMAIL VERIFICATION UX FIX - services/api.js's shared request()
-      // helper attaches the full parsed JSON body as `error.data` on every
-      // thrown error (unchanged, pre-existing behavior - see that file's
-      // own comment). The backend's login() 403 response for an
-      // unverified, non-system_admin account always carries exactly
-      // `data: { userId, emailVerificationRequired: true }` - this is the
-      // SAME contract Register.jsx's own verify step already consumes,
-      // never a new endpoint or a new backend field. Only this one
-      // specific, structurally-checked shape enters the verify flow;
-      // every other error (wrong password, deactivated account, network
-      // failure, etc.) still falls through to the plain error message
-      // below exactly as before.
-      if (error?.data?.emailVerificationRequired === true && typeof error?.data?.userId === 'string') {
+      // EMAIL VERIFICATION UX FIX (corrected). The backend's login() 403
+      // response body is exactly:
+      //   { status: 'error', message: '...',
+      //     data: { userId, emailVerificationRequired: true } }
+      // i.e. `userId`/`emailVerificationRequired` are nested ONE LEVEL
+      // DEEPER than the response's own top-level `data` field name would
+      // suggest - services/api.js's shared request() helper throws an
+      // Error whose `.data` is the RAW, unmodified body above (so
+      // `error.data.emailVerificationRequired` is always undefined - that
+      // field only exists at `error.data.data.emailVerificationRequired`).
+      // A previous version of this fix read `error.data.emailVerificationRequired`
+      // directly, which is why the Verify Email screen never actually
+      // appeared even though the network tab showed the right 403 payload.
+      // `error.payload` (services/api.js) is the corrected, generic fix:
+      // it flattens whichever convention a given endpoint used (top-level
+      // extra fields, or nested under `data`) into one object, so this
+      // check works regardless of that backend inconsistency, and so does
+      // any other endpoint that follows either shape in the future. Only
+      // this one specific, structurally-checked shape enters the verify
+      // flow; every other error (wrong password, deactivated account,
+      // network failure, etc.) still falls through to the plain error
+      // message below exactly as before.
+      if (error?.payload?.emailVerificationRequired === true && typeof error?.payload?.userId === 'string') {
         // The password is cleared, not preserved, across the trip into
         // the verification screen - "the user only needs to enter the
         // password again" (task spec) - it is never sent anywhere on the
         // verify screen and there is no reason to keep holding it in
         // memory while an unrelated, unauthenticated flow runs.
         setFormData((prev) => ({ ...prev, password: '' }));
-        setVerifyUserId(error.data.userId);
+        setVerifyUserId(error.payload.userId);
       } else {
         // DOC-69 - the extra `getApiErrorMessage` safety net specifically
         // on this page (the very first screen an unauthenticated/offline

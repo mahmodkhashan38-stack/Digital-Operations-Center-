@@ -106,6 +106,28 @@ async function request(path, { method = 'GET', body, token } = {}) {
     error.status = response.status;
     error.data = data;
 
+    // LOGIN EMAIL-VERIFICATION REDIRECT FIX - a small, generic
+    // normalization, not a one-endpoint special case. This project's own
+    // backend controllers are NOT fully consistent about where an error
+    // response puts its extra, endpoint-specific fields: some put them at
+    // the TOP LEVEL of the JSON body, sibling to `status`/`message` (e.g.
+    // request.controller.js's duplicate-detection 409:
+    // `{ status, message, duplicateDetected: true, duplicates }` - see
+    // `error.data` comment just above, still used exactly as before by
+    // Dashboard.jsx); others nest them one level deeper under their own
+    // `data` key (e.g. auth.controller.js's login() 403:
+    // `{ status, message, data: { userId, emailVerificationRequired } }`).
+    // `error.data` above is deliberately left meaning exactly what it
+    // always meant (the raw, unmodified parsed body) so no existing caller
+    // of it needs to change. `error.payload` is an ADDITIONAL, flattened
+    // view - the top-level body's own fields with any nested `data` object
+    // spread on top - so a caller never has to know or guess which of the
+    // two conventions a given endpoint happens to use: both
+    // `error.payload.duplicateDetected` and
+    // `error.payload.emailVerificationRequired` work the same simple way.
+    const nestedData = data && typeof data.data === 'object' && data.data !== null ? data.data : null;
+    error.payload = { ...(data && typeof data === 'object' ? data : {}), ...(nestedData || {}) };
+
     // DOC-69 - only ever considered for an AUTHENTICATED call (a `token`
     // was actually sent - never Login/Register themselves, which never
     // pass one) whose message exactly matches one of the known
