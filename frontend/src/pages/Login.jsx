@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { Link, Navigate, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, SESSION_EXPIRED_FLAG_KEY } from '../context/AuthContext.jsx';
 import { destinationForRole } from '../utils/roleRoutes.js';
 import getApiErrorMessage from '../utils/apiError.js';
+import EmailVerificationForm from '../components/EmailVerificationForm.jsx';
 
 // DOC-69 - "Error & UX Hardening" (task spec section 14: "user sees a
 // meaningful message if practical"). Reads AuthContext's one-time flag
@@ -40,6 +41,7 @@ function postLoginDestination(user) {
 
 function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { login, isAuthenticated, isLoading, user } = useAuth();
 
   const [formData, setFormData] = useState({ email: '', password: '' });
@@ -50,6 +52,33 @@ function Login() {
   // render, so a later re-render (e.g. while `isSubmitting` toggles)
   // never re-reads/re-clears the flag a second time.
   const [showSessionExpired] = useState(readAndClearSessionExpiredFlag);
+
+  // EMAIL VERIFICATION UX FIX - "Manager email verification UX". Before
+  // this fix, a login attempt against any unverified, non-system_admin
+  // account (a Manager created by System Admin, an Employee who never
+  // finished registration verification, an Operator who was originally an
+  // Employee, etc.) got stuck: the backend's login() correctly returns 403
+  // with `data: { userId, emailVerificationRequired: true }` (see
+  // auth.controller.js), but this page only ever showed that response's
+  // flat error message with no way to actually act on it. `verifyUserId`
+  // is that same `userId`, and its presence (rather than a separate
+  // string `step` flag) is what switches this page into the "Verify your
+  // email" screen below - reusing the exact same shared
+  // <EmailVerificationForm> component (components/
+  // EmailVerificationForm.jsx) Register.jsx's own OTP step already uses,
+  // never a second implementation.
+  const [verifyUserId, setVerifyUserId] = useState(null);
+
+  // A one-time success banner, from two possible sources: (a)
+  // Register.jsx navigating back here with `state: { emailVerified: true }`
+  // once a brand-new registration finishes verifying, or (b) this page's
+  // own verification screen below completing successfully. Lazy-
+  // initialized exactly once, the same established pattern
+  // `showSessionExpired` above already uses, so a later re-render never
+  // re-reads router state a second time.
+  const [verifiedMessage, setVerifiedMessage] = useState(() => (
+    location.state?.emailVerified ? 'Email verified successfully. You can now sign in.' : ''
+  ));
 
   if (!isLoading && isAuthenticated) {
     return <Navigate to={postLoginDestination(user)} replace />;
@@ -74,6 +103,7 @@ function Login() {
   const handleSubmit = async (event) => {
     event.preventDefault();
     setServerError('');
+    setVerifiedMessage('');
 
     const validationErrors = validate();
     setErrors(validationErrors);
@@ -90,16 +120,63 @@ function Login() {
       // middleware is what actually blocks every normal route afterward.
       navigate(postLoginDestination(loggedInUser));
     } catch (error) {
-      // DOC-69 - the extra `getApiErrorMessage` safety net specifically on
-      // this page (the very first screen an unauthenticated/offline
-      // visitor can hit) rather than everywhere - see utils/apiError.js's
-      // own comment for why most of this project's existing
-      // `error.message` displays don't need it.
-      setServerError(getApiErrorMessage(error, 'Login failed. Please try again.'));
+      // EMAIL VERIFICATION UX FIX - services/api.js's shared request()
+      // helper attaches the full parsed JSON body as `error.data` on every
+      // thrown error (unchanged, pre-existing behavior - see that file's
+      // own comment). The backend's login() 403 response for an
+      // unverified, non-system_admin account always carries exactly
+      // `data: { userId, emailVerificationRequired: true }` - this is the
+      // SAME contract Register.jsx's own verify step already consumes,
+      // never a new endpoint or a new backend field. Only this one
+      // specific, structurally-checked shape enters the verify flow;
+      // every other error (wrong password, deactivated account, network
+      // failure, etc.) still falls through to the plain error message
+      // below exactly as before.
+      if (error?.data?.emailVerificationRequired === true && typeof error?.data?.userId === 'string') {
+        // The password is cleared, not preserved, across the trip into
+        // the verification screen - "the user only needs to enter the
+        // password again" (task spec) - it is never sent anywhere on the
+        // verify screen and there is no reason to keep holding it in
+        // memory while an unrelated, unauthenticated flow runs.
+        setFormData((prev) => ({ ...prev, password: '' }));
+        setVerifyUserId(error.data.userId);
+      } else {
+        // DOC-69 - the extra `getApiErrorMessage` safety net specifically
+        // on this page (the very first screen an unauthenticated/offline
+        // visitor can hit) rather than everywhere - see utils/apiError.js's
+        // own comment for why most of this project's existing
+        // `error.message` displays don't need it.
+        setServerError(getApiErrorMessage(error, 'Login failed. Please try again.'));
+      }
     } finally {
       setIsSubmitting(false);
     }
   };
+
+  // Any unverified, non-system_admin account that hit the
+  // emailVerificationRequired gate above lands here - a Manager created
+  // by System Admin (the bug this fix targets), a public-registration
+  // Employee who never finished verifying and came back later, an
+  // Operator who was originally an Employee, or any other role email
+  // verification applies to. System Admin can never reach this screen:
+  // the backend's own login() structurally exempts that role from the
+  // emailVerificationRequired gate in the first place (see
+  // auth.controller.js), so this branch is simply never taken for it.
+  if (verifyUserId) {
+    return (
+      <EmailVerificationForm
+        userId={verifyUserId}
+        title="Verify your email"
+        description="We sent a 6-digit verification code to your email address."
+        backLabel="Back to Sign In"
+        onBack={() => setVerifyUserId(null)}
+        onVerified={() => {
+          setVerifyUserId(null);
+          setVerifiedMessage('Email verified successfully. You can now sign in.');
+        }}
+      />
+    );
+  }
 
   return (
     <section className="page auth-page">
@@ -107,9 +184,10 @@ function Login() {
         <h1>Login</h1>
         <p className="auth-subtitle">Sign in to access your Digital Operations Center account.</p>
 
-        {showSessionExpired && !serverError && (
+        {showSessionExpired && !serverError && !verifiedMessage && (
           <p className="form-error form-error-server">Your session has expired. Please sign in again.</p>
         )}
+        {verifiedMessage && <p className="form-success">{verifiedMessage}</p>}
         {serverError && <p className="form-error form-error-server">{serverError}</p>}
 
         <form className="auth-form" onSubmit={handleSubmit} noValidate>
