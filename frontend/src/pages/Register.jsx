@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import { authApi } from '../services/api.js';
 import { EMAIL_REGEX } from '../utils/validation.js';
 import getApiErrorMessage from '../utils/apiError.js';
+import EmailVerificationForm from '../components/EmailVerificationForm.jsx';
 
 // Mirrors the backend's Company Code format (DOC-41): 6 letters/digits.
 // This is just a fast, friendly client-side check for obviously wrong
@@ -11,11 +11,6 @@ import getApiErrorMessage from '../utils/apiError.js';
 // what is actually valid and whether the code resolves to a real,
 // active Organization.
 const COMPANY_CODE_REGEX = /^[A-Za-z0-9]{6}$/;
-
-// The one-time code length - matches backend/src/utils/otp.js's
-// OTP_LENGTH exactly. This is display/UX only (maxLength on the input);
-// the backend is the sole authority on what code is actually accepted.
-const OTP_LENGTH = 6;
 
 // DOC EMAIL AUTHENTICATION & NOTIFICATION UPGRADE ("REGISTRATION UPDATE" +
 // "OTP VERIFICATION FLOW"). Registration is a two-step page:
@@ -30,15 +25,20 @@ const OTP_LENGTH = 6;
 //     so this page does not redirect to /login the moment the account is
 //     created; it advances to the OTP step instead.
 //   STEP 'verify' - the person enters the 6-digit code they received by
-//     email. This calls the public POST /api/auth/verify-email endpoint
-//     (authApi.verifyEmail) with { userId, code } - `userId` is simply
-//     `data.id` from the register response above, never anything the user
-//     types. A "Resend code" action (authApi.resendEmailOtp) is available
-//     for the case where the email is slow, undelivered, or the original
-//     code (10-minute expiry, see emailVerification.service.js) has
-//     lapsed. Only after verification succeeds does this page send the
-//     person to /login - there is still no auto-login here: verifying an
-//     email is not the same event as authenticating, and the account's
+//     email, via the shared <EmailVerificationForm> (components/
+//     EmailVerificationForm.jsx - extracted by the "Manager email
+//     verification UX fix" so Login.jsx's own emailVerificationRequired
+//     screen can reuse the exact same OTP input/verify/resend logic
+//     instead of a second implementation). It calls the public
+//     POST /api/auth/verify-email endpoint with { userId, code } -
+//     `userId` is simply `data.id` from the register response above,
+//     never anything the user types. A "Resend code" action
+//     (POST /api/auth/resend-email-otp) is available for the case where
+//     the email is slow, undelivered, or the original code (10-minute
+//     expiry, see emailVerification.service.js) has lapsed. Only after
+//     verification succeeds does this page send the person to /login (via
+//     `onVerified` below) - there is still no auto-login here: verifying
+//     an email is not the same event as authenticating, and the account's
 //     password was already collected and hashed in the STEP 'form'
 //     request above.
 //
@@ -64,13 +64,6 @@ function Register() {
   const [errors, setErrors] = useState({});
   const [serverError, setServerError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const [otpCode, setOtpCode] = useState('');
-  const [otpError, setOtpError] = useState('');
-  const [otpServerError, setOtpServerError] = useState('');
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [isResending, setIsResending] = useState(false);
-  const [resendMessage, setResendMessage] = useState('');
 
   if (!isLoading && isAuthenticated) {
     return <Navigate to="/dashboard" replace />;
@@ -151,96 +144,14 @@ function Register() {
     }
   };
 
-  const handleVerifySubmit = async (event) => {
-    event.preventDefault();
-    setOtpServerError('');
-    setResendMessage('');
-
-    if (!otpCode.trim() || otpCode.trim().length !== OTP_LENGTH) {
-      setOtpError(`Please enter the ${OTP_LENGTH}-digit code we sent you.`);
-      return;
-    }
-    setOtpError('');
-
-    setIsVerifying(true);
-    try {
-      await authApi.verifyEmail({ userId: registeredUserId, code: otpCode.trim() });
-      navigate('/login', { state: { emailVerified: true } });
-    } catch (error) {
-      setOtpServerError(getApiErrorMessage(error, 'Verification failed. Please check the code and try again.'));
-    } finally {
-      setIsVerifying(false);
-    }
-  };
-
-  const handleResendCode = async () => {
-    setOtpServerError('');
-    setResendMessage('');
-    setIsResending(true);
-    try {
-      await authApi.resendEmailOtp({ userId: registeredUserId });
-      setResendMessage('A new code has been sent to your email.');
-    } catch (error) {
-      setOtpServerError(getApiErrorMessage(error, 'Could not resend the code. Please try again shortly.'));
-    } finally {
-      setIsResending(false);
-    }
-  };
-
   if (step === 'verify') {
     return (
-      <section className="page auth-page">
-        <div className="card auth-card">
-          <h1>Verify Your Email</h1>
-          <p className="auth-subtitle">
-            We sent a verification code to your email address. Enter it below to
-            finish creating your account. You will not be able to sign in until your email is verified.
-          </p>
-
-          {otpServerError && <p className="form-error form-error-server">{otpServerError}</p>}
-          {resendMessage && <p className="form-success">{resendMessage}</p>}
-
-          <form className="auth-form" onSubmit={handleVerifySubmit} noValidate>
-            <div className="form-group">
-              <label htmlFor="otpCode">Verification Code</label>
-              <div className="input-group">
-                <span className="input-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="5" width="18" height="14" rx="2" />
-                    <path d="M3 9h18" />
-                  </svg>
-                </span>
-                <input
-                  id="otpCode"
-                  name="otpCode"
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={OTP_LENGTH}
-                  placeholder="123456"
-                  autoComplete="one-time-code"
-                  value={otpCode}
-                  onChange={(event) => setOtpCode(event.target.value.replace(/\D/g, ''))}
-                />
-              </div>
-              {otpError && <span className="form-error">{otpError}</span>}
-            </div>
-
-            <div className="form-actions">
-              <button type="submit" className="btn btn-primary btn-block" disabled={isVerifying}>
-                {isVerifying ? 'Verifying...' : 'Verify Email'}
-              </button>
-              <button
-                type="button"
-                className="btn btn-outline btn-block"
-                onClick={handleResendCode}
-                disabled={isResending}
-              >
-                {isResending ? 'Sending...' : 'Resend Code'}
-              </button>
-            </div>
-          </form>
-        </div>
-      </section>
+      <EmailVerificationForm
+        userId={registeredUserId}
+        title="Verify Your Email"
+        description="We sent a verification code to your email address. Enter it below to finish creating your account. You will not be able to sign in until your email is verified."
+        onVerified={() => navigate('/login', { state: { emailVerified: true } })}
+      />
     );
   }
 
